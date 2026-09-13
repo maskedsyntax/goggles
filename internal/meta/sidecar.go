@@ -10,6 +10,7 @@ import (
 )
 
 type File struct {
+	Dir          string            `yaml:"-"`
 	Profile      string            `yaml:"profile"`
 	Instagram    PlatformFields    `yaml:"instagram"`
 	YouTube      PlatformFields    `yaml:"youtube"`
@@ -22,20 +23,23 @@ type Target struct {
 }
 
 type PlatformFields struct {
-	Caption     string   `yaml:"caption"`
-	ShareToFeed *bool    `yaml:"share_to_feed"`
-	Title       string   `yaml:"title"`
-	Description string   `yaml:"description"`
-	Tags        []string `yaml:"tags"`
-	Privacy     string   `yaml:"privacy"`
-	CategoryID  string   `yaml:"category_id"`
-	MadeForKids *bool    `yaml:"made_for_kids"`
+	Caption      string   `yaml:"caption"`
+	ShareToFeed  *bool    `yaml:"share_to_feed"`
+	Title        string   `yaml:"title"`
+	Description  string   `yaml:"description"`
+	Tags         []string `yaml:"tags"`
+	Privacy      string   `yaml:"privacy"`
+	CategoryID   string   `yaml:"category_id"`
+	MadeForKids  *bool    `yaml:"made_for_kids"`
+	Carousel     []string `yaml:"carousel"`
+	Audio        string   `yaml:"audio"`
+	SlideSeconds *float64 `yaml:"slide_seconds"`
+	ReplaceAudio *bool    `yaml:"replace_audio"`
 }
 
 func LoadFor(mediaPath string) (File, error) {
-	base := strings.TrimSuffix(mediaPath, filepath.Ext(mediaPath))
-	for _, ext := range []string{".yaml", ".yml"} {
-		p := base + ext
+	candidates := sidecarCandidates(mediaPath)
+	for _, p := range candidates {
 		data, err := os.ReadFile(p)
 		if err != nil {
 			if os.IsNotExist(err) {
@@ -47,9 +51,41 @@ func LoadFor(mediaPath string) (File, error) {
 		if err := yaml.Unmarshal(data, &f); err != nil {
 			return File{}, err
 		}
+		f.Dir = sidecarDir(mediaPath, p)
 		return f, nil
 	}
+	st, err := os.Stat(mediaPath)
+	if err == nil && st.IsDir() {
+		return File{Dir: mediaPath}, nil
+	}
+	if mediaPath != "" {
+		return File{Dir: filepath.Dir(mediaPath)}, nil
+	}
 	return File{}, nil
+}
+
+func sidecarCandidates(mediaPath string) []string {
+	st, err := os.Stat(mediaPath)
+	if err == nil && st.IsDir() {
+		return []string{
+			mediaPath + ".yaml",
+			mediaPath + ".yml",
+			filepath.Join(mediaPath, "carousel.yaml"),
+			filepath.Join(mediaPath, "carousel.yml"),
+			filepath.Join(mediaPath, "goggles.yaml"),
+			filepath.Join(mediaPath, "goggles.yml"),
+		}
+	}
+	base := strings.TrimSuffix(mediaPath, filepath.Ext(mediaPath))
+	return []string{base + ".yaml", base + ".yml"}
+}
+
+func sidecarDir(mediaPath, sidecarPath string) string {
+	st, err := os.Stat(mediaPath)
+	if err == nil && st.IsDir() {
+		return mediaPath
+	}
+	return filepath.Dir(sidecarPath)
 }
 
 func (f File) For(destAlias string, p platform.Platform) (dest, plat PlatformFields) {

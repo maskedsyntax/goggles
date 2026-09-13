@@ -143,7 +143,11 @@ func (a *App) checkDestinations() doctorCheck {
 func checkBinary(name string, required bool) doctorCheck {
 	path, err := exec.LookPath(name)
 	if err != nil {
-		return doctorCheck{Name: name, OK: false, Required: required, Message: name + " not found on PATH"}
+		msg := name + " not found on PATH"
+		if name == "ffmpeg" {
+			msg += " (needed to bake carousel audio and convert PNG)"
+		}
+		return doctorCheck{Name: name, OK: false, Required: required, Message: msg}
 	}
 	return doctorCheck{Name: name, OK: true, Required: required, Message: path}
 }

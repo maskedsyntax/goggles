@@ -22,6 +22,9 @@ func New(api API) *Publisher {
 func (p *Publisher) Platform() platform.Platform { return platform.YouTube }
 
 func (p *Publisher) Validate(ctx context.Context, _ platform.Destination, m platform.Media, _ platform.PlatformMetadata) error {
+	if len(m.Items) >= 2 || m.Kind == media.KindImage {
+		return apperr.Invalid("Instagram carousels cannot be published to YouTube")
+	}
 	if p.SkipValidate {
 		return nil
 	}

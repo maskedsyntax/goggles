@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -21,23 +23,31 @@ import (
 )
 
 type Request struct {
-	Path           string
-	Profile        string
-	Destination    string
-	Platforms      []platform.Platform
-	AllowDuplicate bool
-	DryRun         bool
-	Caption        string
-	ShareToFeed    bool
-	Title          string
-	Description    string
-	Tags           []string
-	Privacy        string
-	CategoryID     string
-	MadeForKids    bool
-	MadeForKidsSet bool
-	ShareToFeedSet bool
-	PublishAt      string
+	Path            string
+	Paths           []string
+	CarouselDir     string
+	CarouselPaths   []string
+	Audio           string
+	SlideSeconds    float64
+	SlideSecondsSet bool
+	ReplaceAudio    bool
+	ReplaceAudioSet bool
+	Profile         string
+	Destination     string
+	Platforms       []platform.Platform
+	AllowDuplicate  bool
+	DryRun          bool
+	Caption         string
+	ShareToFeed     bool
+	Title           string
+	Description     string
+	Tags            []string
+	Privacy         string
+	CategoryID      string
+	MadeForKids     bool
+	MadeForKidsSet  bool
+	ShareToFeedSet  bool
+	PublishAt       string
 }
 
 type JobResult struct {
@@ -57,6 +67,9 @@ type Result struct {
 	BatchID    string      `json:"batch_id,omitempty"`
 	Profile    string      `json:"profile,omitempty"`
 	SourceFile string      `json:"source_file"`
+	Kind       string      `json:"kind,omitempty"`
+	Items      []string    `json:"items,omitempty"`
+	Audio      string      `json:"audio,omitempty"`
 	Jobs       []JobResult `json:"jobs"`
 }
 
@@ -78,17 +91,58 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 	if len(dests) == 0 {
 		return nil, apperr.New(apperr.DestinationNotFound, "no destinations to publish to")
 	}
+	if req.Path == "" {
+		if req.CarouselDir != "" {
+			req.Path = req.CarouselDir
+		} else if len(req.Paths) > 0 {
+			req.Path = req.Paths[0]
+		}
+	}
 	sidecar, err := meta.LoadFor(req.Path)
 	if err != nil {
 		return nil, apperr.Wrap(apperr.InvalidInput, "cannot read sidecar yaml", err)
 	}
-	info, err := media.Probe(ctx, req.Path)
+	req = overlayMedia(req, sidecar)
+	items, err := collectItems(ctx, req)
 	if err != nil {
 		return nil, err
 	}
-	platMedia := media.ToPlatformMedia(info)
+	carousel := media.IsCarousel(items)
+	if carousel {
+		if n := len(items); n < media.MinCarouselItems || n > media.MaxCarouselItems {
+			return nil, apperr.Invalid(fmt.Sprintf("Instagram carousels need 2–10 items, got %d", n))
+		}
+	} else if req.Audio != "" || req.ReplaceAudio || req.SlideSecondsSet {
+		return nil, apperr.Invalid("--audio, --slide-seconds, and --replace-audio apply to Instagram carousels")
+	}
+	slide := req.SlideSeconds
+	if slide <= 0 {
+		slide = media.DefaultSlideSeconds
+	}
+	if slide > media.MaxSlideSeconds {
+		return nil, apperr.Invalid(fmt.Sprintf("--slide-seconds must be <= %.0f", media.MaxSlideSeconds))
+	}
+	sourcePaths := itemPaths(items)
+	hash := items[0].Info.Hash
+	if carousel {
+		hash, err = media.HashCarousel(sourcePaths, req.Audio, slide, req.ReplaceAudio)
+		if err != nil {
+			return nil, err
+		}
+	}
 
-	out := &Result{SourceFile: req.Path, Profile: req.Profile, DryRun: req.DryRun}
+	out := &Result{
+		SourceFile: req.Path,
+		Profile:    req.Profile,
+		DryRun:     req.DryRun,
+		Items:      sourcePaths,
+		Audio:      req.Audio,
+		Kind:       "reel",
+	}
+	if carousel {
+		out.Kind = "carousel"
+	}
+
 	if req.DryRun {
 		out.Success = true
 		for _, d := range dests {
@@ -97,7 +151,25 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 		return out, nil
 	}
 
-	batch, err := jobs.CreateBatch(ctx, r.DB, req.Path, info.Hash)
+	if media.NeedsPrepare(items, req.Audio) {
+		workDir, err := os.MkdirTemp("", "goggles-carousel-*")
+		if err != nil {
+			return nil, apperr.Wrap(apperr.VideoInvalid, "cannot create carousel work directory", err)
+		}
+		defer os.RemoveAll(workDir)
+		items, err = media.Prepare(ctx, items, media.PrepareOpts{
+			Audio:        req.Audio,
+			SlideSeconds: slide,
+			ReplaceAudio: req.ReplaceAudio,
+			WorkDir:      workDir,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	platMedia := toPlatformMedia(items, hash)
+
+	batch, err := jobs.CreateBatch(ctx, r.DB, req.Path, hash)
 	if err != nil {
 		return nil, err
 	}
@@ -105,7 +177,7 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 
 	ok, fail := 0, 0
 	for _, d := range dests {
-		jr := r.runOne(ctx, batch.ID, d, platMedia, info.Hash, req, sidecar)
+		jr := r.runOne(ctx, batch.ID, d, platMedia, hash, req, sidecar)
 		out.Jobs = append(out.Jobs, jr)
 		if jr.Status == jobs.Completed {
 			ok++
@@ -177,7 +249,16 @@ func (r *Runner) runOne(ctx context.Context, batchID string, d account.Destinati
 		}
 	}
 
-	pub, err := r.publisherFor(d)
+	if len(m.Items) >= 2 && d.Platform == platform.YouTube {
+		err := apperr.Invalid("Instagram carousels cannot be published to YouTube")
+		jr.Status = jobs.Failed
+		jr.ErrorCode = string(apperr.InvalidInput)
+		jr.ErrorMessage = err.Error()
+		_ = jobs.SetStatus(ctx, r.DB, job.ID, jobs.Failed, err, "", "")
+		return jr
+	}
+
+	pub, err := r.publisherFor(d, job.ID)
 	if err != nil {
 		jr.Status = jobs.Failed
 		code := apperr.NotImplemented
@@ -238,7 +319,7 @@ func (r *Runner) runOne(ctx context.Context, batchID string, d account.Destinati
 	return jr
 }
 
-func (r *Runner) publisherFor(d account.Destination) (platform.Publisher, error) {
+func (r *Runner) publisherFor(d account.Destination, jobID string) (platform.Publisher, error) {
 	token, err := r.token(d)
 	if err != nil {
 		return nil, err
@@ -253,6 +334,7 @@ func (r *Runner) publisherFor(d account.Destination) (platform.Publisher, error)
 		}
 		p := instagram.New(api, r.Host)
 		p.DB = r.DB
+		p.JobID = jobID
 		return p, nil
 	case platform.YouTube:
 		var api youtube.API
@@ -301,6 +383,118 @@ func (r *Runner) resolve(ctx context.Context, req Request) ([]account.Destinatio
 		return nil, err
 	}
 	return profile.DestinationsForPlatforms(view, req.Platforms), nil
+}
+
+func overlayMedia(req Request, file meta.File) Request {
+	ig := file.Instagram
+	req.Audio = firstNonEmpty(req.Audio, ig.Audio)
+	if req.Audio != "" {
+		req.Audio = absFrom(file.Dir, req.Audio)
+	}
+	if !req.SlideSecondsSet && ig.SlideSeconds != nil {
+		req.SlideSeconds = *ig.SlideSeconds
+		req.SlideSecondsSet = true
+	}
+	if !req.ReplaceAudioSet && ig.ReplaceAudio != nil {
+		req.ReplaceAudio = *ig.ReplaceAudio
+		req.ReplaceAudioSet = true
+	}
+	if len(req.CarouselPaths) == 0 && len(ig.Carousel) > 0 {
+		req.CarouselPaths = resolveAll(file.Dir, ig.Carousel)
+	}
+	return req
+}
+
+func collectItems(ctx context.Context, req Request) ([]media.Item, error) {
+	if strings.TrimSpace(req.CarouselDir) != "" && len(req.Paths) > 0 {
+		return nil, apperr.Invalid("use --carousel or file arguments, not both")
+	}
+	if req.CarouselDir != "" {
+		if len(req.CarouselPaths) > 0 {
+			return media.Collect(ctx, req.CarouselPaths)
+		}
+		return media.CollectDir(ctx, req.CarouselDir)
+	}
+	paths := append([]string{}, req.Paths...)
+	if len(paths) == 0 && req.Path != "" {
+		paths = []string{req.Path}
+	}
+	if len(paths) == 1 {
+		st, err := os.Stat(paths[0])
+		if err != nil {
+			return nil, mapPathError(paths[0], err)
+		}
+		if st.IsDir() {
+			if len(req.CarouselPaths) > 0 {
+				return media.Collect(ctx, req.CarouselPaths)
+			}
+			return media.CollectDir(ctx, paths[0])
+		}
+		if len(req.CarouselPaths) > 0 {
+			return media.Collect(ctx, req.CarouselPaths)
+		}
+	}
+	return media.Collect(ctx, paths)
+}
+
+func toPlatformMedia(items []media.Item, hash string) platform.Media {
+	first := media.ToPlatformMedia(items[0].Info)
+	first.Hash = hash
+	if media.IsCarousel(items) {
+		first.Items = make([]platform.Media, 0, len(items))
+		for _, it := range items {
+			first.Items = append(first.Items, media.ToPlatformMedia(it.Info))
+		}
+	}
+	return first
+}
+
+func itemPaths(items []media.Item) []string {
+	out := make([]string, 0, len(items))
+	for _, it := range items {
+		out = append(out, it.Path)
+	}
+	return out
+}
+
+func resolveAll(dir string, paths []string) []string {
+	out := make([]string, 0, len(paths))
+	for _, p := range paths {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, absFrom(dir, p))
+	}
+	return out
+}
+
+func absFrom(dir, path string) string {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return path
+	}
+	if filepath.IsAbs(path) {
+		return path
+	}
+	if dir == "" {
+		return path
+	}
+	joined := filepath.Join(dir, path)
+	if _, err := os.Stat(joined); err == nil {
+		return joined
+	}
+	if _, err := os.Stat(path); err == nil {
+		return path
+	}
+	return joined
+}
+
+func mapPathError(path string, err error) error {
+	if os.IsNotExist(err) {
+		return apperr.New(apperr.FileNotFound, path)
+	}
+	return apperr.Wrap(apperr.FileUnreadable, "cannot read "+path, err)
 }
 
 func overlaySidecar(req Request, file meta.File, destAlias string, p platform.Platform) Request {

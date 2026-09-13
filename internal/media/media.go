@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -17,9 +18,16 @@ import (
 	"github.com/maskedsyntax/goggles/internal/platform"
 )
 
+const (
+	KindVideo = "video"
+	KindImage = "image"
+	KindAudio = "audio"
+)
+
 type Info struct {
 	Path       string        `json:"path"`
 	Hash       string        `json:"hash"`
+	Kind       string        `json:"kind,omitempty"`
 	SizeBytes  int64         `json:"size_bytes"`
 	Container  string        `json:"container"`
 	Duration   time.Duration `json:"duration_ns"`
@@ -63,6 +71,34 @@ func HashFile(path string) (string, error) {
 }
 
 func Probe(ctx context.Context, path string) (Info, error) {
+	info, err := probe(ctx, path)
+	if err != nil {
+		return Info{}, err
+	}
+	if isStillImage(info) {
+		info.Kind = KindImage
+		return info, nil
+	}
+	if !info.HasVideo {
+		return Info{}, apperr.New(apperr.VideoInvalid, "no video stream found")
+	}
+	info.Kind = KindVideo
+	return info, nil
+}
+
+func ProbeAudio(ctx context.Context, path string) (Info, error) {
+	info, err := probe(ctx, path)
+	if err != nil {
+		return Info{}, err
+	}
+	if !info.HasAudio {
+		return Info{}, apperr.New(apperr.VideoInvalid, "no audio stream found")
+	}
+	info.Kind = KindAudio
+	return info, nil
+}
+
+func probe(ctx context.Context, path string) (Info, error) {
 	st, err := os.Stat(path)
 	if err != nil {
 		return Info{}, mapOpenError(path, err)
@@ -95,8 +131,8 @@ func Probe(ctx context.Context, path string) (Info, error) {
 		return Info{}, apperr.Wrap(apperr.VideoInvalid, msg, err)
 	}
 
-	var probe ffprobeOutput
-	if err := json.Unmarshal(out, &probe); err != nil {
+	var raw ffprobeOutput
+	if err := json.Unmarshal(out, &raw); err != nil {
 		return Info{}, apperr.Wrap(apperr.VideoInvalid, "cannot parse ffprobe output", err)
 	}
 
@@ -104,20 +140,20 @@ func Probe(ctx context.Context, path string) (Info, error) {
 		Path:      path,
 		Hash:      hash,
 		SizeBytes: st.Size(),
-		Container: probe.Format.FormatName,
+		Container: raw.Format.FormatName,
 	}
-	if probe.Format.Duration != "" {
-		if d, err := strconv.ParseFloat(probe.Format.Duration, 64); err == nil {
+	if raw.Format.Duration != "" {
+		if d, err := strconv.ParseFloat(raw.Format.Duration, 64); err == nil {
 			info.DurationS = d
 			info.Duration = time.Duration(d * float64(time.Second))
 		}
 	}
-	if probe.Format.BitRate != "" {
-		if n, err := strconv.ParseInt(probe.Format.BitRate, 10, 64); err == nil {
+	if raw.Format.BitRate != "" {
+		if n, err := strconv.ParseInt(raw.Format.BitRate, 10, 64); err == nil {
 			info.Bitrate = n
 		}
 	}
-	for _, s := range probe.Streams {
+	for _, s := range raw.Streams {
 		switch s.CodecType {
 		case "video":
 			if info.HasVideo {
@@ -141,9 +177,6 @@ func Probe(ctx context.Context, path string) (Info, error) {
 			info.HasAudio = true
 			info.AudioCodec = s.CodecName
 		}
-	}
-	if !info.HasVideo {
-		return Info{}, apperr.New(apperr.VideoInvalid, "no video stream found")
 	}
 	return info, nil
 }
@@ -172,10 +205,35 @@ func CheckFile(ctx context.Context, path string, platforms []platform.Platform) 
 	return rep, nil
 }
 
+func CheckCarouselItem(ctx context.Context, path string) (Report, error) {
+	info, err := Probe(ctx, path)
+	if err != nil {
+		return Report{}, err
+	}
+	rep := Report{OK: true, Info: info, Platform: string(platform.Instagram)}
+	if info.Kind == KindImage {
+		rep.Checks = append(rep.Checks, imageChecks(info)...)
+		rep.Checks = append(rep.Checks, instagramImageChecks(info)...)
+	} else {
+		rep.Checks = append(rep.Checks, genericChecks(info)...)
+		rep.Checks = append(rep.Checks, instagramCarouselVideoChecks(info)...)
+	}
+	for _, c := range rep.Checks {
+		if !c.OK && c.Severity == "error" {
+			rep.OK = false
+		}
+	}
+	if !rep.OK {
+		return rep, apperr.New(apperr.VideoInvalid, "carousel item failed validation")
+	}
+	return rep, nil
+}
+
 func ToPlatformMedia(info Info) platform.Media {
 	return platform.Media{
 		Path:       info.Path,
 		Hash:       info.Hash,
+		Kind:       info.Kind,
 		Container:  info.Container,
 		VideoCodec: info.VideoCodec,
 		AudioCodec: info.AudioCodec,
@@ -190,6 +248,9 @@ func ToPlatformMedia(info Info) platform.Media {
 }
 
 func genericChecks(info Info) []Check {
+	if info.Kind == KindImage {
+		return imageChecks(info)
+	}
 	var out []Check
 	out = append(out, okCheck("exists", "file exists and is readable"))
 	out = append(out, okCheck("video_stream", fmt.Sprintf("video codec %s %dx%d", info.VideoCodec, info.Width, info.Height)))
@@ -211,6 +272,18 @@ func genericChecks(info Info) []Check {
 	return out
 }
 
+func imageChecks(info Info) []Check {
+	var out []Check
+	out = append(out, okCheck("exists", "file exists and is readable"))
+	out = append(out, okCheck("image", fmt.Sprintf("%s %dx%d", info.VideoCodec, info.Width, info.Height)))
+	if info.SizeBytes == 0 {
+		out = append(out, Check{Name: "file_size", OK: false, Severity: "error", Message: "file is empty"})
+	} else {
+		out = append(out, okCheck("file_size", fmt.Sprintf("%d bytes", info.SizeBytes)))
+	}
+	return out
+}
+
 func platformChecks(info Info, p platform.Platform) []Check {
 	switch p {
 	case platform.Instagram:
@@ -223,6 +296,39 @@ func platformChecks(info Info, p platform.Platform) []Check {
 }
 
 func instagramChecks(info Info) []Check {
+	if info.Kind == KindImage {
+		return instagramImageChecks(info)
+	}
+	return instagramVideoChecks(info, 3)
+}
+
+func instagramCarouselVideoChecks(info Info) []Check {
+	return instagramVideoChecks(info, 1)
+}
+
+func instagramImageChecks(info Info) []Check {
+	var out []Check
+	if !isJPEG(info) {
+		out = append(out, fail("instagram.image", "Instagram carousels require JPEG (convert PNG first)"))
+	} else {
+		out = append(out, okCheck("instagram.image", "jpeg"))
+	}
+	if info.Width < 1 || info.Height < 1 {
+		out = append(out, fail("instagram.dimensions", "image has no width/height"))
+	} else if info.Width < 320 || info.Height < 320 {
+		out = append(out, Check{Name: "instagram.dimensions", OK: true, Severity: "warning", Message: "320px on the short side is recommended"})
+	} else {
+		out = append(out, okCheck("instagram.dimensions", fmt.Sprintf("%dx%d", info.Width, info.Height)))
+	}
+	if info.SizeBytes > 8*1024*1024 {
+		out = append(out, fail("instagram.file_size", "max image size is 8MB"))
+	} else {
+		out = append(out, okCheck("instagram.file_size", fmt.Sprintf("%d bytes", info.SizeBytes)))
+	}
+	return out
+}
+
+func instagramVideoChecks(info Info, minSeconds float64) []Check {
 	var out []Check
 	if !containerAllowed(info.Container, "mp4", "mov") {
 		out = append(out, fail("instagram.container", "expected mp4 or mov, got "+info.Container))
@@ -242,8 +348,8 @@ func instagramChecks(info Info) []Check {
 	if info.Width > 1920 {
 		out = append(out, fail("instagram.width", "max width is 1920"))
 	}
-	if info.DurationS < 3 || info.DurationS > 15*60 {
-		out = append(out, fail("instagram.duration", "must be between 3s and 15m"))
+	if info.DurationS < minSeconds || info.DurationS > 15*60 {
+		out = append(out, fail("instagram.duration", fmt.Sprintf("must be between %.0fs and 15m", minSeconds)))
 	} else {
 		out = append(out, okCheck("instagram.duration", fmt.Sprintf("%.3fs", info.DurationS)))
 	}
@@ -264,6 +370,9 @@ func instagramChecks(info Info) []Check {
 }
 
 func youtubeChecks(info Info) []Check {
+	if info.Kind == KindImage {
+		return []Check{fail("youtube.media", "YouTube Shorts need a video, not an image")}
+	}
 	var out []Check
 	if info.DurationS > 180 {
 		out = append(out, fail("youtube.duration", "Shorts must be 180 seconds or less"))
@@ -306,6 +415,31 @@ func codecAllowed(got string, want ...string) bool {
 		}
 	}
 	return false
+}
+
+func isStillImage(info Info) bool {
+	if containerAllowed(info.Container, "mp4", "mov", "matroska", "webm", "avi") {
+		return false
+	}
+	switch strings.ToLower(info.VideoCodec) {
+	case "mjpeg", "mjpegb", "png", "webp", "bmp", "gif", "tiff", "jpeg":
+		return true
+	}
+	f := strings.ToLower(info.Container)
+	return strings.Contains(f, "image2") || strings.Contains(f, "pipe") || strings.Contains(f, "jpeg") || strings.Contains(f, "png")
+}
+
+func isJPEG(info Info) bool {
+	c := strings.ToLower(info.VideoCodec)
+	f := strings.ToLower(info.Container)
+	ext := strings.ToLower(filepath.Ext(info.Path))
+	if ext == ".jpg" || ext == ".jpeg" {
+		return true
+	}
+	if c == "mjpeg" || c == "jpeg" || c == "mjpegb" {
+		return true
+	}
+	return strings.Contains(f, "jpeg") || strings.Contains(f, "mjpeg")
 }
 
 func near(got, want, tol float64) bool {

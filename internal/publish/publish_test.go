@@ -23,6 +23,12 @@ type stubAPI struct {
 func (s stubAPI) CreateReel(context.Context, string, string, string, bool) (string, error) {
 	return "c1", nil
 }
+func (s stubAPI) CreateCarouselItem(context.Context, string, string, string) (string, error) {
+	return "child1", nil
+}
+func (s stubAPI) CreateCarousel(context.Context, string, []string, string, bool) (string, error) {
+	return "carousel1", nil
+}
 func (s stubAPI) ContainerStatus(context.Context, string) (string, error) { return "FINISHED", nil }
 func (s stubAPI) PublishContainer(context.Context, string, string) (string, error) {
 	return s.media, nil
@@ -136,6 +142,100 @@ func TestPublishYouTube(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !res.Success || res.Jobs[0].ExternalMediaID != "ytvid" {
+		t.Fatalf("%+v", res)
+	}
+}
+
+func TestPublishCarousel(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	sqlDB, err := db.Open(filepath.Join(t.TempDir(), "goggles.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	ctx := context.Background()
+	pair, err := account.Add(ctx, sqlDB, account.AddInput{
+		Platform: platform.Instagram, Alias: "patterns-instagram", Username: "patterns_app", UserID: "1784140000", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kc := keychain.NewMemory()
+	if err := kc.Set("instagram/"+pair.Account.ID, "tok"); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	a := filepath.Join(dir, "01.jpg")
+	b := filepath.Join(dir, "02.jpg")
+	for _, path := range []string{a, b} {
+		cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+			"-f", "lavfi", "-i", "color=c=blue:s=1080x1350", "-frames:v", "1", "-y", path)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("jpeg: %v\n%s", err, out)
+		}
+	}
+	runner := &Runner{
+		DB: sqlDB, Host: storage.NewMemory("https://r2.test", time.Hour), Keychain: kc,
+		NewIGClient: func(string) instagram.API { return stubAPI{media: "carousel-media"} },
+	}
+	res, err := runner.Run(ctx, Request{Path: dir, Destination: "patterns-instagram", Caption: "swipe"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Success || res.Kind != "carousel" || res.Jobs[0].ExternalMediaID != "carousel-media" {
+		t.Fatalf("%+v", res)
+	}
+	if len(res.Items) != 2 {
+		t.Fatalf("items %v", res.Items)
+	}
+}
+
+func TestPublishCarouselRejectedOnYouTube(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	sqlDB, err := db.Open(filepath.Join(t.TempDir(), "goggles.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	ctx := context.Background()
+	pair, err := account.Add(ctx, sqlDB, account.AddInput{
+		Platform: platform.YouTube, Alias: "patterns-youtube-main", ChannelID: "UCabc", ChannelTitle: "Patterns", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kc := keychain.NewMemory()
+	if err := kc.Set("youtube/"+pair.Account.ID, "tok"); err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	for _, name := range []string{"01.jpg", "02.jpg"} {
+		path := filepath.Join(dir, name)
+		cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+			"-f", "lavfi", "-i", "color=c=blue:s=1080x1350", "-frames:v", "1", "-y", path)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("jpeg: %v\n%s", err, out)
+		}
+	}
+	runner := &Runner{
+		DB: sqlDB, Host: storage.NewMemory("https://r2.test", time.Hour), Keychain: kc,
+		NewYTClient: func(string) youtube.API { return ytStub{} },
+	}
+	res, err := runner.Run(ctx, Request{Path: dir, Destination: "patterns-youtube-main"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Success || res.Jobs[0].ErrorCode != "INVALID_INPUT" {
 		t.Fatalf("%+v", res)
 	}
 }

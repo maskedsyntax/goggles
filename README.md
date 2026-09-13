@@ -8,7 +8,7 @@ See `spec.md` for the locked product specification.
 
 ## Status
 
-Schedules and a foreground/launchd daemon can consume queued videos at destination slots. Browser OAuth is still token-based.
+Schedules and a foreground/launchd daemon can consume queued videos at destination slots. Browser OAuth (loopback) and `--access-token` login both work. Instagram carousels (2–10 images/videos) can be published with an optional ffmpeg-baked soundtrack.
 
 ## Requirements
 
@@ -50,6 +50,8 @@ goggles auth login instagram --alias patterns-instagram
 
 Register `http://127.0.0.1:8787/callback` as the OAuth redirect URI in the Meta and Google consoles.
 goggles publish ./video.mp4 --destination patterns-instagram --caption "Hello" --json
+goggles publish ./slides --destination patterns-instagram --caption "Swipe" --audio ./song.mp3 --json
+goggles publish 01.jpg 02.jpg 03.jpg --destination patterns-instagram --caption "Swipe"
 
 goggles auth setup youtube --client-id CLIENT_ID --client-secret CLIENT_SECRET
 goggles auth login youtube --alias patterns-youtube-main --channel-id UCabc123
@@ -70,7 +72,9 @@ goggles job list --json
 goggles history list --json
 ```
 
-Metadata: optional `video.yaml` sidecar next to `video.mp4`. Precedence is CLI flags, then destination sidecar, then platform sidecar.
+Metadata: optional `video.yaml` sidecar next to `video.mp4`, or `carousel.yaml` / `goggles.yaml` inside a carousel directory. Precedence is CLI flags, then destination sidecar, then platform sidecar.
+
+Instagram carousels are 2–10 JPEG images and/or videos (`--carousel DIR`, a directory argument, or multiple files). PNG stills are converted to JPEG. `--audio` bakes a soundtrack into stills (default 3s per slide) and into silent videos; videos that already have audio keep it unless `--replace-audio`. Carousels are Instagram-only — YouTube jobs fail with `INVALID_INPUT`. Queue/daemon still consume single files.
 
 Global flags: `--json`, `--dry-run`, `--verbose`, `--quiet`, `--non-interactive`.
 

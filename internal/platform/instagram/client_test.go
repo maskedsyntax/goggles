@@ -70,3 +70,53 @@ func TestRateLimit(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestClientCarouselFlow(t *testing.T) {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v25.0/1784140000/media", func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		s := string(body)
+		switch {
+		case strings.Contains(s, "is_carousel_item=true") && strings.Contains(s, "image_url"):
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "child1"})
+		case strings.Contains(s, "is_carousel_item=true") && strings.Contains(s, "media_type=VIDEO"):
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "child2"})
+		case strings.Contains(s, "media_type=CAROUSEL") && strings.Contains(s, "child1") && strings.Contains(s, "child2"):
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "parent1"})
+		default:
+			http.Error(w, `{"error":{"message":"bad carousel","code":1}}`, 400)
+		}
+	})
+	mux.HandleFunc("/v25.0/child1", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"status_code": "FINISHED"})
+	})
+	mux.HandleFunc("/v25.0/child2", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"status_code": "FINISHED"})
+	})
+	mux.HandleFunc("/v25.0/parent1", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"status_code": "FINISHED"})
+	})
+	mux.HandleFunc("/v25.0/1784140000/media_publish", func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode(map[string]string{"id": "media-carousel"})
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	c := NewClient(srv.URL+"/v25.0", "tok", srv.Client())
+	a, err := c.CreateCarouselItem(context.Background(), "1784140000", "https://r2.test/a.jpg", "")
+	if err != nil || a != "child1" {
+		t.Fatalf("image child %s %v", a, err)
+	}
+	b, err := c.CreateCarouselItem(context.Background(), "1784140000", "", "https://r2.test/b.mp4")
+	if err != nil || b != "child2" {
+		t.Fatalf("video child %s %v", b, err)
+	}
+	parent, err := c.CreateCarousel(context.Background(), "1784140000", []string{a, b}, "swipe", false)
+	if err != nil || parent != "parent1" {
+		t.Fatalf("parent %s %v", parent, err)
+	}
+	mid, err := c.PublishContainer(context.Background(), "1784140000", parent)
+	if err != nil || mid != "media-carousel" {
+		t.Fatalf("publish %s %v", mid, err)
+	}
+}

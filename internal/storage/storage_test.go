@@ -31,6 +31,12 @@ func TestObjectKey(t *testing.T) {
 	}
 }
 
+func TestContentType(t *testing.T) {
+	if ContentType("a.jpg") != "image/jpeg" || ContentType("a.mp4") != "video/mp4" {
+		t.Fatalf("content types")
+	}
+}
+
 func TestMemoryUploadDelete(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "a.mp4")

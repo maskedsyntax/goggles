@@ -45,6 +45,19 @@ Optional Reels fields we should support later: `caption`, `share_to_feed`, `cove
 
 Use `media_type=REELS` for standalone video. `VIDEO` is for carousel items and will fail as a standalone publish.
 
+### Carousel publish flow
+
+2–10 images, videos, or a mix. Reels are **not** valid carousel children.
+
+1. For each item, `POST /{ig-user-id}/media` with `is_carousel_item=true`. Images use `image_url` (JPEG only). Videos use `media_type=VIDEO` and `video_url`.
+2. Poll each child `GET /{container-id}?fields=status_code` until `FINISHED`.
+3. `POST /{ig-user-id}/media` with `media_type=CAROUSEL` and `children` as a comma-separated list of child container IDs. Caption belongs on this parent container.
+4. Poll the parent container, then `POST /{ig-user-id}/media_publish` with `creation_id` of the parent.
+
+Carousel images are cropped to the first item’s aspect (default 1:1). A carousel counts as one published post. Instagram has no API for attaching its in-app music library; goggles bakes a local soundtrack with ffmpeg before upload.
+
+JPEG is the only image format. PNG is converted locally. Max image size 8 MB.
+
 ### Reel file specs (official)
 
 - Container: MOV or MP4, no edit lists, moov atom at the front

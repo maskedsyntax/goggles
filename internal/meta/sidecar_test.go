@@ -44,3 +44,39 @@ destinations:
 		t.Fatalf("platform other: %s", plat2.Title)
 	}
 }
+
+func TestLoadCarouselSidecar(t *testing.T) {
+	dir := t.TempDir()
+	slides := filepath.Join(dir, "slides")
+	if err := os.Mkdir(slides, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	yaml := []byte(`
+instagram:
+  caption: swipe
+  audio: song.mp3
+  slide_seconds: 4
+  carousel:
+    - 01.jpg
+    - 02.jpg
+`)
+	if err := os.WriteFile(filepath.Join(slides, "carousel.yaml"), yaml, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	file, err := LoadFor(slides)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.Dir != slides {
+		t.Fatalf("dir %s", file.Dir)
+	}
+	if file.Instagram.Caption != "swipe" || file.Instagram.Audio != "song.mp3" {
+		t.Fatalf("%+v", file.Instagram)
+	}
+	if file.Instagram.SlideSeconds == nil || *file.Instagram.SlideSeconds != 4 {
+		t.Fatalf("slide %+v", file.Instagram.SlideSeconds)
+	}
+	if len(file.Instagram.Carousel) != 2 {
+		t.Fatalf("carousel %v", file.Instagram.Carousel)
+	}
+}

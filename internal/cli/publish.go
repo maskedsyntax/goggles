@@ -15,13 +15,19 @@ func newPublishCmd(app *App) *cobra.Command {
 	var (
 		profileName, dest, platforms, caption, at     string
 		title, description, tags, privacy, categoryID string
+		carouselDir, audio                            string
+		slideSeconds                                  float64
 		allowDup, shareToFeed, madeForKids            bool
+		replaceAudio                                  bool
 	)
 	cmd := &cobra.Command{
-		Use:   "publish <file>",
-		Short: "Publish a video now or at a timestamp",
-		Args:  cobra.ExactArgs(1),
+		Use:   "publish [file...]",
+		Short: "Publish a Reel, Short, or Instagram carousel",
+		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if carouselDir == "" && len(args) == 0 {
+				return apperr.Invalid("pass a file, files, or --carousel <dir>")
+			}
 			publishAt := ""
 			if at != "" {
 				ts, err := time.Parse(time.RFC3339, at)
@@ -64,24 +70,37 @@ func newPublishCmd(app *App) *cobra.Command {
 					tagList = append(tagList, t)
 				}
 			}
+			path := ""
+			if len(args) > 0 {
+				path = args[0]
+			} else {
+				path = carouselDir
+			}
 			res, err := runner.Run(cmd.Context(), publish.Request{
-				Path:           args[0],
-				Profile:        profileName,
-				Destination:    dest,
-				Platforms:      plats,
-				AllowDuplicate: allowDup,
-				DryRun:         app.DryRun,
-				Caption:        caption,
-				ShareToFeed:    shareToFeed,
-				ShareToFeedSet: cmd.Flags().Changed("share-to-feed"),
-				Title:          title,
-				Description:    description,
-				Tags:           tagList,
-				Privacy:        privacy,
-				CategoryID:     categoryID,
-				MadeForKids:    madeForKids,
-				MadeForKidsSet: cmd.Flags().Changed("made-for-kids"),
-				PublishAt:      publishAt,
+				Path:            path,
+				Paths:           args,
+				CarouselDir:     carouselDir,
+				Audio:           audio,
+				SlideSeconds:    slideSeconds,
+				SlideSecondsSet: cmd.Flags().Changed("slide-seconds"),
+				ReplaceAudio:    replaceAudio,
+				ReplaceAudioSet: cmd.Flags().Changed("replace-audio"),
+				Profile:         profileName,
+				Destination:     dest,
+				Platforms:       plats,
+				AllowDuplicate:  allowDup,
+				DryRun:          app.DryRun,
+				Caption:         caption,
+				ShareToFeed:     shareToFeed,
+				ShareToFeedSet:  cmd.Flags().Changed("share-to-feed"),
+				Title:           title,
+				Description:     description,
+				Tags:            tagList,
+				Privacy:         privacy,
+				CategoryID:      categoryID,
+				MadeForKids:     madeForKids,
+				MadeForKidsSet:  cmd.Flags().Changed("made-for-kids"),
+				PublishAt:       publishAt,
 			})
 			if err != nil {
 				return err
@@ -117,5 +136,9 @@ func newPublishCmd(app *App) *cobra.Command {
 	cmd.Flags().BoolVar(&madeForKids, "made-for-kids", false, "YouTube made for kids")
 	cmd.Flags().BoolVar(&shareToFeed, "share-to-feed", false, "also share the Reel to the IG feed")
 	cmd.Flags().BoolVar(&allowDup, "allow-duplicate", false, "allow posting the same hash to a destination again")
+	cmd.Flags().StringVar(&carouselDir, "carousel", "", "directory of 2–10 images/videos for an Instagram carousel")
+	cmd.Flags().StringVar(&audio, "audio", "", "soundtrack to bake into carousel slides (and silent videos)")
+	cmd.Flags().Float64Var(&slideSeconds, "slide-seconds", 3, "duration of each still when baking --audio")
+	cmd.Flags().BoolVar(&replaceAudio, "replace-audio", false, "replace audio on carousel videos that already have a soundtrack")
 	return cmd
 }

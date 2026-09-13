@@ -15,6 +15,8 @@ import (
 
 type API interface {
 	CreateReel(ctx context.Context, igUserID, videoURL, caption string, shareToFeed bool) (string, error)
+	CreateCarouselItem(ctx context.Context, igUserID, imageURL, videoURL string) (string, error)
+	CreateCarousel(ctx context.Context, igUserID string, children []string, caption string, shareToFeed bool) (string, error)
 	ContainerStatus(ctx context.Context, containerID string) (string, error)
 	PublishContainer(ctx context.Context, igUserID, containerID string) (string, error)
 	Me(ctx context.Context) (userID, username string, err error)
@@ -77,6 +79,55 @@ func (c *Client) CreateReel(ctx context.Context, igUserID, videoURL, caption str
 	}
 	if caption != "" {
 		form.Set("caption", caption)
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := c.post(ctx, igUserID+"/media", form, &out); err != nil {
+		return "", mapInstagram(err, apperr.InstagramContainerFailed)
+	}
+	if out.ID == "" {
+		return "", apperr.New(apperr.InstagramContainerFailed, "container id missing")
+	}
+	return out.ID, nil
+}
+
+func (c *Client) CreateCarouselItem(ctx context.Context, igUserID, imageURL, videoURL string) (string, error) {
+	form := url.Values{"is_carousel_item": {"true"}}
+	switch {
+	case strings.TrimSpace(videoURL) != "":
+		form.Set("media_type", "VIDEO")
+		form.Set("video_url", videoURL)
+	case strings.TrimSpace(imageURL) != "":
+		form.Set("image_url", imageURL)
+	default:
+		return "", apperr.Invalid("carousel item needs image_url or video_url")
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if err := c.post(ctx, igUserID+"/media", form, &out); err != nil {
+		return "", mapInstagram(err, apperr.InstagramContainerFailed)
+	}
+	if out.ID == "" {
+		return "", apperr.New(apperr.InstagramContainerFailed, "container id missing")
+	}
+	return out.ID, nil
+}
+
+func (c *Client) CreateCarousel(ctx context.Context, igUserID string, children []string, caption string, shareToFeed bool) (string, error) {
+	if len(children) < 2 || len(children) > 10 {
+		return "", apperr.Invalid("Instagram carousels need 2–10 items")
+	}
+	form := url.Values{
+		"media_type": {"CAROUSEL"},
+		"children":   {strings.Join(children, ",")},
+	}
+	if caption != "" {
+		form.Set("caption", caption)
+	}
+	if shareToFeed {
+		form.Set("share_to_feed", "true")
 	}
 	var out struct {
 		ID string `json:"id"`

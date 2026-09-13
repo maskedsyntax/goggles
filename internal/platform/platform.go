@@ -45,6 +45,7 @@ type Destination struct {
 type Media struct {
 	Path       string
 	Hash       string
+	Kind       string // video or image
 	Container  string
 	VideoCodec string
 	AudioCodec string
@@ -55,6 +56,7 @@ type Media struct {
 	Bitrate    int64
 	SizeBytes  int64
 	HasAudio   bool
+	Items      []Media // 2–10 items means an Instagram carousel
 }
 
 type PlatformMetadata map[string]any

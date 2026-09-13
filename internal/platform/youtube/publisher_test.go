@@ -44,3 +44,17 @@ func TestPublisherRequiresMatchingChannel(t *testing.T) {
 		t.Fatalf("%+v title=%s", res, api.title)
 	}
 }
+
+func TestPublisherRejectsCarousel(t *testing.T) {
+	p := New(&stubAPI{channels: []Channel{{ID: "UCabc"}}, uploaded: "vid"})
+	p.SkipValidate = true
+	_, err := p.Publish(context.Background(), platform.Destination{ExternalID: "UCabc"}, platform.Media{
+		Path:  "a.jpg",
+		Kind:  "image",
+		Items: []platform.Media{{Path: "a.jpg"}, {Path: "b.jpg"}},
+	}, nil)
+	e, ok := apperr.As(err)
+	if !ok || e.Code != apperr.InvalidInput {
+		t.Fatalf("got %v", err)
+	}
+}

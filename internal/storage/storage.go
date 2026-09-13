@@ -71,6 +71,14 @@ func ContentType(filename string) string {
 		return "video/mp4"
 	case ".mov":
 		return "video/quicktime"
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".m4a", ".aac":
+		return "audio/mp4"
+	case ".mp3":
+		return "audio/mpeg"
 	case ".txt":
 		return "text/plain"
 	default:
