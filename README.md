@@ -8,7 +8,7 @@ See `spec.md` for the locked product specification.
 
 ## Status
 
-Phase 2: config, SQLite, accounts/profiles, media checks, doctor, and Cloudflare R2 temporary hosting. Instagram/YouTube publish, queue, scheduler, and daemon come next.
+Phase 3: local accounts/profiles, media checks, R2 hosting, and Instagram Reel publish (token login + Graph container flow). YouTube upload, queue, scheduler, and daemon come next.
 
 ## Requirements
 
@@ -43,6 +43,9 @@ goggles config set r2.public_base_url https://media.example.com
 goggles storage credentials --access-key ... --secret-key ...
 goggles storage test
 goggles storage cleanup
+
+goggles auth login instagram --alias patterns-instagram --access-token TOKEN --user-id IG_USER_ID --username patterns_app
+goggles publish ./video.mp4 --destination patterns-instagram --caption "Hello" --json
 ```
 
 Global flags: `--json`, `--dry-run`, `--verbose`, `--quiet`, `--non-interactive`.

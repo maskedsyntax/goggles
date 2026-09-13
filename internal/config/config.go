@@ -89,6 +89,7 @@ type R2 struct {
 type Meta struct {
 	AppID        string `toml:"app_id"`
 	GraphVersion string `toml:"graph_version"`
+	GraphHost    string `toml:"graph_host"`
 }
 
 type Google struct {
@@ -115,6 +116,7 @@ func Default() File {
 		},
 		Meta: Meta{
 			GraphVersion: "v25.0",
+			GraphHost:    "https://graph.facebook.com",
 		},
 	}
 }
@@ -154,6 +156,9 @@ func (f *File) applyDefaults() {
 	}
 	if f.Meta.GraphVersion == "" {
 		f.Meta.GraphVersion = d.Meta.GraphVersion
+	}
+	if f.Meta.GraphHost == "" {
+		f.Meta.GraphHost = d.Meta.GraphHost
 	}
 	if f.R2.AccessKeyRef == "" {
 		f.R2.AccessKeyRef = d.R2.AccessKeyRef
@@ -248,6 +253,8 @@ func (f *File) Set(key, value string) error {
 		f.Meta.AppID = value
 	case "meta.graph_version":
 		f.Meta.GraphVersion = value
+	case "meta.graph_host":
+		f.Meta.GraphHost = value
 	case "google.client_id":
 		f.Google.ClientID = value
 	case "google.client_secret_ref":

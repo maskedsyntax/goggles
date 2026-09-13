@@ -48,6 +48,7 @@ type AddInput struct {
 	Username     string
 	ChannelID    string
 	ChannelTitle string
+	UserID       string
 	Timezone     string
 	Enabled      bool
 }
@@ -96,8 +97,12 @@ func Add(ctx context.Context, sqlDB *sql.DB, in AddInput) (Pair, error) {
 		CreatedAt:        now,
 		UpdatedAt:        now,
 	}
-	if dest.Platform == platform.Instagram && dest.ExternalID == "" {
-		dest.ExternalID = dest.ExternalUsername
+	if dest.Platform == platform.Instagram {
+		if strings.TrimSpace(in.UserID) != "" {
+			dest.ExternalID = strings.TrimSpace(in.UserID)
+		} else if dest.ExternalID == "" {
+			dest.ExternalID = dest.ExternalUsername
+		}
 	}
 
 	err := db.WithTx(ctx, sqlDB, func(tx *sql.Tx) error {
@@ -179,6 +184,14 @@ func GetDestinationByAlias(ctx context.Context, sqlDB *sql.DB, alias string) (De
 		return Destination{}, err
 	}
 	return p.Destination, nil
+}
+
+func SetCredentialRef(ctx context.Context, sqlDB *sql.DB, accountID, ref string) error {
+	_, err := sqlDB.ExecContext(ctx, `UPDATE accounts SET credential_ref = ?, updated_at = ? WHERE id = ?`, ref, db.Now(), accountID)
+	if err != nil {
+		return apperr.Wrap(apperr.DatabaseError, "cannot store credential ref", err)
+	}
+	return nil
 }
 
 func Remove(ctx context.Context, sqlDB *sql.DB, alias string) error {

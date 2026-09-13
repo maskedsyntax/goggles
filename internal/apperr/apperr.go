@@ -30,6 +30,7 @@ const (
 	NotImplemented      Code = "NOT_IMPLEMENTED"
 	InvalidInput        Code = "INVALID_INPUT"
 	AlreadyExists       Code = "ALREADY_EXISTS"
+	Partial             Code = "PARTIAL"
 
 	R2UploadFailed            Code = "R2_UPLOAD_FAILED"
 	R2DeleteFailed            Code = "R2_DELETE_FAILED"
@@ -90,6 +91,8 @@ func (e *Error) ExitCode() int {
 		return ExitAuth
 	case DuplicateContent:
 		return ExitDuplicate
+	case Partial:
+		return ExitPartial
 	default:
 		return ExitGeneric
 	}

@@ -13,8 +13,8 @@ func newAccountCmd(app *App) *cobra.Command {
 	cmd := &cobra.Command{Use: "account", Short: "Connect Instagram accounts and YouTube channels"}
 
 	var (
-		alias, username, channelID, channelTitle, timezone, displayName string
-		disabled                                                        bool
+		alias, username, channelID, channelTitle, timezone, displayName, accessToken, userID string
+		disabled                                                                             bool
 	)
 	add := &cobra.Command{
 		Use:   "add <platform>",
@@ -47,11 +47,22 @@ func newAccountCmd(app *App) *cobra.Command {
 				Username:     username,
 				ChannelID:    channelID,
 				ChannelTitle: channelTitle,
+				UserID:       userID,
 				Timezone:     firstNonEmpty(timezone, app.Config.General.Timezone),
 				Enabled:      !disabled,
 			})
 			if err != nil {
 				return err
+			}
+			if accessToken != "" {
+				ref := string(p) + "/" + pair.Account.ID
+				if err := app.Keychain.Set(ref, accessToken); err != nil {
+					return err
+				}
+				if err := account.SetCredentialRef(cmd.Context(), app.DB, pair.Account.ID, "keychain:"+ref); err != nil {
+					return err
+				}
+				pair.Account.CredentialRef = "keychain:" + ref
 			}
 			return app.Out.Success(map[string]any{
 				"account":     pair.Account,
@@ -66,6 +77,8 @@ func newAccountCmd(app *App) *cobra.Command {
 	add.Flags().StringVar(&displayName, "display-name", "", "human-readable name")
 	add.Flags().StringVar(&timezone, "timezone", "", "destination timezone")
 	add.Flags().BoolVar(&disabled, "disabled", false, "create disabled")
+	add.Flags().StringVar(&accessToken, "access-token", "", "store a platform access token in the keychain")
+	add.Flags().StringVar(&userID, "user-id", "", "Instagram professional account id")
 
 	cmd.AddCommand(
 		add,
