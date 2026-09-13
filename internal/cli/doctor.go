@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"github.com/maskedsyntax/goggles/internal/apperr"
+	"github.com/maskedsyntax/goggles/internal/daemon"
 	"github.com/maskedsyntax/goggles/internal/db"
 	"github.com/maskedsyntax/goggles/internal/storage"
 	"github.com/maskedsyntax/goggles/internal/storage/r2"
@@ -38,7 +39,9 @@ func newDoctorCmd(app *App) *cobra.Command {
 				{Name: "meta", OK: app.Config.Meta.AppID != "", Required: false, Message: emptyOr("Meta app id is not configured", app.Config.Meta.AppID != "", "Meta app id is set")},
 				{Name: "google", OK: app.Config.Google.ClientID != "", Required: false, Message: emptyOr("Google OAuth client id is not configured", app.Config.Google.ClientID != "", "Google client id is set")},
 				app.checkDestinations(),
-				{Name: "daemon", OK: false, Required: false, Message: "daemon is not installed yet"},
+				app.checkAuth(),
+				app.checkStaleUploads(),
+				app.checkDaemon(),
 			}
 
 			ok := true
@@ -172,4 +175,52 @@ func emptyOr(empty string, ok bool, good string) string {
 		return good
 	}
 	return empty
+}
+
+func (a *App) checkDaemon() doctorCheck {
+	st, err := daemon.LaunchAgentStatus()
+	if err != nil {
+		return doctorCheck{Name: "daemon", OK: false, Required: false, Message: err.Error()}
+	}
+	installed, _ := st["installed"].(bool)
+	loaded, _ := st["loaded"].(bool)
+	if loaded {
+		return doctorCheck{Name: "daemon", OK: true, Required: false, Message: "LaunchAgent loaded"}
+	}
+	if installed {
+		return doctorCheck{Name: "daemon", OK: false, Required: false, Message: "plist installed but not loaded"}
+	}
+	return doctorCheck{Name: "daemon", OK: false, Required: false, Message: "LaunchAgent not installed"}
+}
+
+func (a *App) checkStaleUploads() doctorCheck {
+	sqlDB, err := db.Open(a.Paths.DBFile)
+	if err != nil {
+		return doctorCheck{Name: "r2_cleanup", OK: false, Required: false, Message: err.Error()}
+	}
+	defer sqlDB.Close()
+	n, err := storage.CountPending(context.Background(), sqlDB)
+	if err != nil {
+		return doctorCheck{Name: "r2_cleanup", OK: false, Required: false, Message: err.Error()}
+	}
+	if n > 0 {
+		return doctorCheck{Name: "r2_cleanup", OK: false, Required: false, Message: "pending temporary objects"}
+	}
+	return doctorCheck{Name: "r2_cleanup", OK: true, Required: false, Message: "no pending R2 objects"}
+}
+
+func (a *App) checkAuth() doctorCheck {
+	sqlDB, err := db.Open(a.Paths.DBFile)
+	if err != nil {
+		return doctorCheck{Name: "auth", OK: false, Required: false, Message: err.Error()}
+	}
+	defer sqlDB.Close()
+	var n int
+	if err := sqlDB.QueryRow(`SELECT COUNT(1) FROM accounts WHERE credential_ref IS NOT NULL AND credential_ref != ''`).Scan(&n); err != nil {
+		return doctorCheck{Name: "auth", OK: false, Required: false, Message: err.Error()}
+	}
+	if n == 0 {
+		return doctorCheck{Name: "auth", OK: false, Required: false, Message: "no stored platform tokens"}
+	}
+	return doctorCheck{Name: "auth", OK: true, Required: false, Message: "tokens stored"}
 }

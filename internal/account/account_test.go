@@ -45,3 +45,25 @@ func TestDuplicateAlias(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 }
+
+func TestDailyLimit(t *testing.T) {
+	sqlDB, err := db.Open(filepath.Join(t.TempDir(), "goggles.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	ctx := context.Background()
+	if _, err := Add(ctx, sqlDB, AddInput{Platform: platform.YouTube, Alias: "yt", ChannelID: "UCabc", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := SetDailyLimit(ctx, sqlDB, "yt", 5); err != nil {
+		t.Fatal(err)
+	}
+	d, err := GetDestinationByAlias(ctx, sqlDB, "yt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if DailyLimit(d) != 5 {
+		t.Fatalf("limit %d", DailyLimit(d))
+	}
+}

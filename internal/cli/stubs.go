@@ -23,11 +23,3 @@ func stubTree(use, short string, children ...string) *cobra.Command {
 	}
 	return cmd
 }
-
-func newJobCmd(_ *App) *cobra.Command {
-	return stubTree("job", "Inspect publication jobs", "list", "show", "retry", "cancel")
-}
-
-func newHistoryCmd(_ *App) *cobra.Command {
-	return stubTree("history", "Published items", "list", "show", "export")
-}

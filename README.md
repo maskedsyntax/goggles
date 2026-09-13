@@ -59,7 +59,13 @@ goggles schedule set --destination patterns-instagram 09:00 12:30 16:00 19:30 22
 goggles schedule set --destination patterns-youtube-main 09:10 12:40 16:10 19:40 22:40
 goggles daemon run --once --json
 goggles daemon install
+
+goggles destination set patterns-youtube-main --daily-limit 5
+goggles job list --json
+goggles history list --json
 ```
+
+Metadata: optional `video.yaml` sidecar next to `video.mp4`. Precedence is CLI flags, then destination sidecar, then platform sidecar.
 
 Global flags: `--json`, `--dry-run`, `--verbose`, `--quiet`, `--non-interactive`.
 

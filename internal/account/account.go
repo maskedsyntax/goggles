@@ -3,6 +3,7 @@ package account
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"regexp"
 	"strings"
@@ -190,6 +191,52 @@ func SetCredentialRef(ctx context.Context, sqlDB *sql.DB, accountID, ref string)
 	_, err := sqlDB.ExecContext(ctx, `UPDATE accounts SET credential_ref = ?, updated_at = ? WHERE id = ?`, ref, db.Now(), accountID)
 	if err != nil {
 		return apperr.Wrap(apperr.DatabaseError, "cannot store credential ref", err)
+	}
+	return nil
+}
+
+func DailyLimit(d Destination) int {
+	if strings.TrimSpace(d.MetadataJSON) == "" {
+		return 0
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(d.MetadataJSON), &m); err != nil {
+		return 0
+	}
+	switch v := m["daily_limit"].(type) {
+	case float64:
+		return int(v)
+	case int:
+		return v
+	default:
+		return 0
+	}
+}
+
+func SetDailyLimit(ctx context.Context, sqlDB *sql.DB, alias string, limit int) error {
+	if limit < 0 {
+		return apperr.Invalid("daily limit must be >= 0 (0 means unlimited)")
+	}
+	d, err := GetDestinationByAlias(ctx, sqlDB, alias)
+	if err != nil {
+		return err
+	}
+	m := map[string]any{}
+	if strings.TrimSpace(d.MetadataJSON) != "" {
+		_ = json.Unmarshal([]byte(d.MetadataJSON), &m)
+	}
+	if limit == 0 {
+		delete(m, "daily_limit")
+	} else {
+		m["daily_limit"] = limit
+	}
+	raw, err := json.Marshal(m)
+	if err != nil {
+		return apperr.Wrap(apperr.DatabaseError, "cannot encode destination metadata", err)
+	}
+	_, err = sqlDB.ExecContext(ctx, `UPDATE destinations SET metadata_json = ?, updated_at = ? WHERE id = ?`, string(raw), db.Now(), d.ID)
+	if err != nil {
+		return apperr.Wrap(apperr.DatabaseError, "cannot update destination", err)
 	}
 	return nil
 }

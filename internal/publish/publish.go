@@ -3,13 +3,16 @@ package publish
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"strings"
+	"time"
 
 	"github.com/maskedsyntax/goggles/internal/account"
 	"github.com/maskedsyntax/goggles/internal/apperr"
 	"github.com/maskedsyntax/goggles/internal/jobs"
 	"github.com/maskedsyntax/goggles/internal/keychain"
 	"github.com/maskedsyntax/goggles/internal/media"
+	"github.com/maskedsyntax/goggles/internal/meta"
 	"github.com/maskedsyntax/goggles/internal/platform"
 	"github.com/maskedsyntax/goggles/internal/platform/instagram"
 	"github.com/maskedsyntax/goggles/internal/platform/youtube"
@@ -32,6 +35,8 @@ type Request struct {
 	Privacy        string
 	CategoryID     string
 	MadeForKids    bool
+	MadeForKidsSet bool
+	ShareToFeedSet bool
 	PublishAt      string
 }
 
@@ -73,6 +78,10 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 	if len(dests) == 0 {
 		return nil, apperr.New(apperr.DestinationNotFound, "no destinations to publish to")
 	}
+	sidecar, err := meta.LoadFor(req.Path)
+	if err != nil {
+		return nil, apperr.Wrap(apperr.InvalidInput, "cannot read sidecar yaml", err)
+	}
 	info, err := media.Probe(ctx, req.Path)
 	if err != nil {
 		return nil, err
@@ -96,7 +105,7 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 
 	ok, fail := 0, 0
 	for _, d := range dests {
-		jr := r.runOne(ctx, batch.ID, d, platMedia, info.Hash, req)
+		jr := r.runOne(ctx, batch.ID, d, platMedia, info.Hash, req, sidecar)
 		out.Jobs = append(out.Jobs, jr)
 		if jr.Status == jobs.Completed {
 			ok++
@@ -119,7 +128,7 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 	return out, nil
 }
 
-func (r *Runner) runOne(ctx context.Context, batchID string, d account.Destination, m platform.Media, hash string, req Request) JobResult {
+func (r *Runner) runOne(ctx context.Context, batchID string, d account.Destination, m platform.Media, hash string, req Request, sidecar meta.File) JobResult {
 	jr := JobResult{Destination: d.Alias, Platform: string(d.Platform)}
 	job, err := jobs.CreateJob(ctx, r.DB, batchID, d.ID, d.Platform)
 	if err != nil {
@@ -129,11 +138,24 @@ func (r *Runner) runOne(ctx context.Context, batchID string, d account.Destinati
 		return jr
 	}
 	jr.JobID = job.ID
+	req = overlaySidecar(req, sidecar, d.Alias, d.Platform)
 	if !d.Enabled {
 		jr.Status = jobs.Failed
 		jr.ErrorCode = string(apperr.DestinationDisabled)
 		jr.ErrorMessage = d.Alias + " is disabled"
 		_ = jobs.SetStatus(ctx, r.DB, job.ID, jobs.Failed, apperr.New(apperr.DestinationDisabled, jr.ErrorMessage), "", "")
+		return jr
+	}
+	if err := r.checkDailyLimit(ctx, d); err != nil {
+		jr.Status = jobs.Failed
+		if e, ok := apperr.As(err); ok {
+			jr.ErrorCode = string(e.Code)
+			jr.ErrorMessage = e.Message
+		} else {
+			jr.ErrorCode = string(apperr.DailyLimit)
+			jr.ErrorMessage = err.Error()
+		}
+		_ = jobs.SetStatus(ctx, r.DB, job.ID, jobs.Failed, err, "", "")
 		return jr
 	}
 	if !req.AllowDuplicate {
@@ -279,6 +301,68 @@ func (r *Runner) resolve(ctx context.Context, req Request) ([]account.Destinatio
 		return nil, err
 	}
 	return profile.DestinationsForPlatforms(view, req.Platforms), nil
+}
+
+func overlaySidecar(req Request, file meta.File, destAlias string, p platform.Platform) Request {
+	dest, plat := file.For(destAlias, p)
+	req.Caption = firstNonEmpty(req.Caption, dest.Caption, plat.Caption)
+	req.Title = firstNonEmpty(req.Title, dest.Title, plat.Title)
+	req.Description = firstNonEmpty(req.Description, dest.Description, plat.Description)
+	req.Privacy = firstNonEmpty(req.Privacy, dest.Privacy, plat.Privacy)
+	req.CategoryID = firstNonEmpty(req.CategoryID, dest.CategoryID, plat.CategoryID)
+	if len(req.Tags) == 0 {
+		req.Tags = dest.Tags
+		if len(req.Tags) == 0 {
+			req.Tags = plat.Tags
+		}
+	}
+	if !req.ShareToFeedSet {
+		if dest.ShareToFeed != nil {
+			req.ShareToFeed = *dest.ShareToFeed
+		} else if plat.ShareToFeed != nil {
+			req.ShareToFeed = *plat.ShareToFeed
+		}
+	}
+	if !req.MadeForKidsSet {
+		if dest.MadeForKids != nil {
+			req.MadeForKids = *dest.MadeForKids
+		} else if plat.MadeForKids != nil {
+			req.MadeForKids = *plat.MadeForKids
+		}
+	}
+	return req
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func (r *Runner) checkDailyLimit(ctx context.Context, d account.Destination) error {
+	limit := account.DailyLimit(d)
+	if limit <= 0 {
+		return nil
+	}
+	loc := time.UTC
+	if d.Timezone != "" {
+		if l, err := time.LoadLocation(d.Timezone); err == nil {
+			loc = l
+		}
+	}
+	now := time.Now().In(loc)
+	start := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	n, err := jobs.CountPublishedSince(ctx, r.DB, d.ID, start.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	if n >= limit {
+		return apperr.New(apperr.DailyLimit, fmt.Sprintf("%s has reached its daily limit (%d)", d.Alias, limit))
+	}
+	return nil
 }
 
 func toPlatformDest(d account.Destination) platform.Destination {

@@ -71,6 +71,7 @@ func newRoot(app *App) *cobra.Command {
 		newScheduleCmd(app),
 		newJobCmd(app),
 		newHistoryCmd(app),
+		newDestinationCmd(app),
 		newStorageCmd(app),
 		newDaemonCmd(app),
 		newConfigCmd(app),

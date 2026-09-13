@@ -192,3 +192,171 @@ func IsJobSuccess(status string) bool {
 var ErrNoRows = sql.ErrNoRows
 
 func Discard(err error) bool { return errors.Is(err, sql.ErrNoRows) }
+
+type Filter struct {
+	Status      string
+	Destination string
+	Limit       int
+}
+
+type View struct {
+	Job
+	Destination    string `json:"destination"`
+	SourceFilePath string `json:"source_file_path"`
+	ContentHash    string `json:"content_hash"`
+}
+
+func List(ctx context.Context, sqlDB *sql.DB, f Filter) ([]View, error) {
+	q := `
+		SELECT j.id, j.batch_id, j.destination_id, j.platform, j.status, j.attempt_count,
+			j.last_error_code, j.last_error_message, j.external_container_id, j.external_media_id,
+			j.created_at, j.updated_at, j.completed_at, d.alias, b.source_file_path, b.content_hash
+		FROM jobs j
+		JOIN destinations d ON d.id = j.destination_id
+		JOIN batches b ON b.id = j.batch_id
+		WHERE 1=1`
+	var args []any
+	if f.Status != "" {
+		q += ` AND j.status = ?`
+		args = append(args, f.Status)
+	}
+	if f.Destination != "" {
+		q += ` AND d.alias = ?`
+		args = append(args, f.Destination)
+	}
+	q += ` ORDER BY j.created_at DESC`
+	if f.Limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, f.Limit)
+	}
+	rows, err := sqlDB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, apperr.Wrap(apperr.DatabaseError, "cannot list jobs", err)
+	}
+	defer rows.Close()
+	var out []View
+	for rows.Next() {
+		v, err := scanView(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func Get(ctx context.Context, sqlDB *sql.DB, jobID string) (View, error) {
+	row := sqlDB.QueryRowContext(ctx, `
+		SELECT j.id, j.batch_id, j.destination_id, j.platform, j.status, j.attempt_count,
+			j.last_error_code, j.last_error_message, j.external_container_id, j.external_media_id,
+			j.created_at, j.updated_at, j.completed_at, d.alias, b.source_file_path, b.content_hash
+		FROM jobs j
+		JOIN destinations d ON d.id = j.destination_id
+		JOIN batches b ON b.id = j.batch_id
+		WHERE j.id = ?`, jobID)
+	v, err := scanView(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return View{}, apperr.New(apperr.JobNotFound, jobID)
+	}
+	if err != nil {
+		return View{}, apperr.Wrap(apperr.DatabaseError, "cannot load job", err)
+	}
+	return v, nil
+}
+
+func Cancel(ctx context.Context, sqlDB *sql.DB, jobID string) error {
+	v, err := Get(ctx, sqlDB, jobID)
+	if err != nil {
+		return err
+	}
+	if v.Status == Completed || v.Status == Published || v.Status == Cancelled {
+		return apperr.Invalid("job cannot be cancelled in status " + v.Status)
+	}
+	return SetStatus(ctx, sqlDB, jobID, Cancelled, nil, v.ExternalMediaID, v.ExternalContainerID)
+}
+
+func CountPublishedSince(ctx context.Context, sqlDB *sql.DB, destID, sinceRFC3339 string) (int, error) {
+	var n int
+	err := sqlDB.QueryRowContext(ctx, `SELECT COUNT(1) FROM publications WHERE destination_id = ? AND published_at >= ?`, destID, sinceRFC3339).Scan(&n)
+	if err != nil {
+		return 0, apperr.Wrap(apperr.DatabaseError, "cannot count publications", err)
+	}
+	return n, nil
+}
+
+type PubView struct {
+	Publication
+	Destination string `json:"destination"`
+}
+
+func ListPublications(ctx context.Context, sqlDB *sql.DB, destAlias string, limit int) ([]PubView, error) {
+	q := `
+		SELECT p.id, p.job_id, p.destination_id, p.platform, p.content_hash, p.source_file_path,
+			p.external_media_id, p.external_url, p.published_at, d.alias
+		FROM publications p
+		JOIN destinations d ON d.id = p.destination_id
+		WHERE 1=1`
+	var args []any
+	if destAlias != "" {
+		q += ` AND d.alias = ?`
+		args = append(args, destAlias)
+	}
+	q += ` ORDER BY p.published_at DESC`
+	if limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
+	rows, err := sqlDB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, apperr.Wrap(apperr.DatabaseError, "cannot list history", err)
+	}
+	defer rows.Close()
+	var out []PubView
+	for rows.Next() {
+		var v PubView
+		var extID, extURL sql.NullString
+		if err := rows.Scan(&v.ID, &v.JobID, &v.DestinationID, &v.Platform, &v.ContentHash, &v.SourceFilePath, &extID, &extURL, &v.PublishedAt, &v.Destination); err != nil {
+			return nil, apperr.Wrap(apperr.DatabaseError, "cannot scan publication", err)
+		}
+		v.ExternalMediaID = extID.String
+		v.ExternalURL = extURL.String
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
+func GetPublication(ctx context.Context, sqlDB *sql.DB, id string) (PubView, error) {
+	row := sqlDB.QueryRowContext(ctx, `
+		SELECT p.id, p.job_id, p.destination_id, p.platform, p.content_hash, p.source_file_path,
+			p.external_media_id, p.external_url, p.published_at, d.alias
+		FROM publications p
+		JOIN destinations d ON d.id = p.destination_id
+		WHERE p.id = ? OR p.job_id = ? OR p.external_media_id = ?`, id, id, id)
+	var v PubView
+	var extID, extURL sql.NullString
+	err := row.Scan(&v.ID, &v.JobID, &v.DestinationID, &v.Platform, &v.ContentHash, &v.SourceFilePath, &extID, &extURL, &v.PublishedAt, &v.Destination)
+	if errors.Is(err, sql.ErrNoRows) {
+		return PubView{}, apperr.New(apperr.JobNotFound, "publication not found")
+	}
+	if err != nil {
+		return PubView{}, apperr.Wrap(apperr.DatabaseError, "cannot load publication", err)
+	}
+	v.ExternalMediaID = extID.String
+	v.ExternalURL = extURL.String
+	return v, nil
+}
+
+func scanView(row interface{ Scan(dest ...any) error }) (View, error) {
+	var v View
+	var errCode, errMsg, container, media, completed sql.NullString
+	if err := row.Scan(&v.ID, &v.BatchID, &v.DestinationID, &v.Platform, &v.Status, &v.AttemptCount,
+		&errCode, &errMsg, &container, &media, &v.CreatedAt, &v.UpdatedAt, &completed, &v.Destination, &v.SourceFilePath, &v.ContentHash); err != nil {
+		return View{}, err
+	}
+	v.LastErrorCode = errCode.String
+	v.LastErrorMessage = errMsg.String
+	v.ExternalContainerID = container.String
+	v.ExternalMediaID = media.String
+	v.CompletedAt = completed.String
+	return v, nil
+}

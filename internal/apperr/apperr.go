@@ -31,6 +31,8 @@ const (
 	InvalidInput        Code = "INVALID_INPUT"
 	AlreadyExists       Code = "ALREADY_EXISTS"
 	Partial             Code = "PARTIAL"
+	JobNotFound         Code = "JOB_NOT_FOUND"
+	DailyLimit          Code = "DAILY_LIMIT"
 
 	R2UploadFailed            Code = "R2_UPLOAD_FAILED"
 	R2DeleteFailed            Code = "R2_DELETE_FAILED"
@@ -83,9 +85,9 @@ func (e *Error) ExitCode() int {
 	switch e.Code {
 	case InvalidInput:
 		return ExitUsage
-	case AccountNotFound, DestinationNotFound, ProfileNotFound, FileNotFound:
+	case AccountNotFound, DestinationNotFound, ProfileNotFound, FileNotFound, JobNotFound:
 		return ExitNotFound
-	case FileUnreadable, VideoInvalid:
+	case FileUnreadable, VideoInvalid, DailyLimit:
 		return ExitValidation
 	case AuthRequired, AuthExpired, PermissionMissing, GoogleAuthFailed, KeychainError:
 		return ExitAuth

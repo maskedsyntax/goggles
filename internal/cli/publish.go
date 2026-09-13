@@ -73,12 +73,14 @@ func newPublishCmd(app *App) *cobra.Command {
 				DryRun:         app.DryRun,
 				Caption:        caption,
 				ShareToFeed:    shareToFeed,
+				ShareToFeedSet: cmd.Flags().Changed("share-to-feed"),
 				Title:          title,
 				Description:    description,
 				Tags:           tagList,
 				Privacy:        privacy,
 				CategoryID:     categoryID,
 				MadeForKids:    madeForKids,
+				MadeForKidsSet: cmd.Flags().Changed("made-for-kids"),
 				PublishAt:      publishAt,
 			})
 			if err != nil {
