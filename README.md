@@ -8,7 +8,7 @@ See `spec.md` for the locked product specification.
 
 ## Status
 
-Phase 6: Instagram Reels and YouTube Shorts immediate publish, R2 transport for Instagram, and content queues. Scheduler and daemon come next.
+Schedules and a foreground/launchd daemon can consume queued videos at destination slots. Browser OAuth is still token-based.
 
 ## Requirements
 
@@ -54,6 +54,11 @@ goggles publish ./video.mp4 --destination patterns-youtube-main --title "Hello" 
 goggles queue add ./video.mp4 --profile patterns
 goggles queue fill ./reels --profile patterns
 goggles queue list --profile patterns --json
+
+goggles schedule set --destination patterns-instagram 09:00 12:30 16:00 19:30 22:30
+goggles schedule set --destination patterns-youtube-main 09:10 12:40 16:10 19:40 22:40
+goggles daemon run --once --json
+goggles daemon install
 ```
 
 Global flags: `--json`, `--dry-run`, `--verbose`, `--quiet`, `--non-interactive`.

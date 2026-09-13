@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/maskedsyntax/goggles/internal/account"
 	"github.com/maskedsyntax/goggles/internal/apperr"
@@ -166,6 +167,7 @@ type ListFilter struct {
 	Profile     string
 	Destination string
 	Status      string
+	DueBefore   string
 }
 
 func List(ctx context.Context, sqlDB *sql.DB, f ListFilter) ([]Item, error) {
@@ -188,6 +190,10 @@ func List(ctx context.Context, sqlDB *sql.DB, f ListFilter) ([]Item, error) {
 	if f.Status != "" {
 		q += ` AND q.status = ?`
 		args = append(args, f.Status)
+	}
+	if f.DueBefore != "" {
+		q += ` AND q.scheduled_for IS NOT NULL AND q.scheduled_for <= ?`
+		args = append(args, f.DueBefore)
 	}
 	q += ` ORDER BY q.position, q.created_at`
 	rows, err := sqlDB.QueryContext(ctx, q, args...)
@@ -331,4 +337,73 @@ func boolToInt(v bool) int {
 		return 1
 	}
 	return 0
+}
+
+func ListDueOneOffs(ctx context.Context, sqlDB *sql.DB, now time.Time) ([]Item, error) {
+	return List(ctx, sqlDB, ListFilter{Status: Ready, DueBefore: now.UTC().Format(time.RFC3339)})
+}
+
+func SetStatus(ctx context.Context, sqlDB *sql.DB, itemID, status string) error {
+	_, err := sqlDB.ExecContext(ctx, `UPDATE queue_items SET status = ?, updated_at = ? WHERE id = ?`, status, db.Now(), itemID)
+	if err != nil {
+		return apperr.Wrap(apperr.DatabaseError, "cannot update queue item", err)
+	}
+	return nil
+}
+
+func NextDue(ctx context.Context, sqlDB *sql.DB, destID string, now time.Time) (Item, error) {
+	nowStr := now.UTC().Format(time.RFC3339)
+	row := sqlDB.QueryRowContext(ctx, `
+		SELECT q.id, q.profile_id, q.destination_id, p.name, d.alias, q.file_path, q.content_hash,
+			q.status, q.position, q.scheduled_for, q.created_at, q.updated_at
+		FROM queue_items q
+		LEFT JOIN profiles p ON p.id = q.profile_id
+		LEFT JOIN destinations d ON d.id = q.destination_id
+		WHERE q.status = ?
+		  AND (q.scheduled_for IS NULL OR q.scheduled_for <= ?)
+		  AND (
+			q.destination_id = ?
+			OR (
+				q.profile_id IS NOT NULL
+				AND EXISTS (
+					SELECT 1 FROM profile_destinations pd
+					WHERE pd.profile_id = q.profile_id AND pd.destination_id = ? AND pd.enabled = 1
+				)
+				AND NOT EXISTS (
+					SELECT 1 FROM publications pub
+					WHERE pub.destination_id = ? AND pub.content_hash = q.content_hash
+				)
+			)
+		  )
+		ORDER BY CASE WHEN q.destination_id = ? THEN 0 ELSE 1 END, q.position, q.created_at
+		LIMIT 1`, Ready, nowStr, destID, destID, destID, destID)
+	item, err := scanItem(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Item{}, apperr.New(apperr.QueueEmpty, "no ready queue item")
+	}
+	if err != nil {
+		return Item{}, err
+	}
+	return item, nil
+}
+
+func CompleteIfDone(ctx context.Context, sqlDB *sql.DB, item Item) error {
+	if item.DestinationID != "" {
+		return SetStatus(ctx, sqlDB, item.ID, Published)
+	}
+	var remaining int
+	err := sqlDB.QueryRowContext(ctx, `
+		SELECT COUNT(1) FROM profile_destinations pd
+		WHERE pd.profile_id = ? AND pd.enabled = 1
+		  AND NOT EXISTS (
+			SELECT 1 FROM publications pub
+			WHERE pub.destination_id = pd.destination_id AND pub.content_hash = ?
+		  )`, item.ProfileID, item.ContentHash).Scan(&remaining)
+	if err != nil {
+		return apperr.Wrap(apperr.DatabaseError, "cannot check queue completion", err)
+	}
+	if remaining == 0 {
+		return SetStatus(ctx, sqlDB, item.ID, Published)
+	}
+	return nil
 }

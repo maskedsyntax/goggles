@@ -24,18 +24,10 @@ func stubTree(use, short string, children ...string) *cobra.Command {
 	return cmd
 }
 
-func newScheduleCmd(_ *App) *cobra.Command {
-	return stubTree("schedule", "Recurring posting slots per destination", "set", "show", "clear", "enable", "disable")
-}
-
 func newJobCmd(_ *App) *cobra.Command {
 	return stubTree("job", "Inspect publication jobs", "list", "show", "retry", "cancel")
 }
 
 func newHistoryCmd(_ *App) *cobra.Command {
 	return stubTree("history", "Published items", "list", "show", "export")
-}
-
-func newDaemonCmd(_ *App) *cobra.Command {
-	return stubTree("daemon", "Background scheduler", "run", "install", "uninstall", "status", "logs")
 }
