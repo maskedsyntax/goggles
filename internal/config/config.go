@@ -88,8 +88,10 @@ type R2 struct {
 
 type Meta struct {
 	AppID        string `toml:"app_id"`
+	AppSecretRef string `toml:"app_secret_ref"`
 	GraphVersion string `toml:"graph_version"`
 	GraphHost    string `toml:"graph_host"`
+	OAuthPort    int    `toml:"oauth_port"`
 }
 
 type Google struct {
@@ -115,8 +117,13 @@ func Default() File {
 			SecretKeyRef: "keychain:goggles-r2-secret",
 		},
 		Meta: Meta{
+			AppSecretRef: "keychain:goggles-meta-app-secret",
 			GraphVersion: "v25.0",
-			GraphHost:    "https://graph.facebook.com",
+			GraphHost:    "https://graph.instagram.com",
+			OAuthPort:    8787,
+		},
+		Google: Google{
+			ClientSecretRef: "keychain:goggles-google-client-secret",
 		},
 	}
 }
@@ -159,6 +166,15 @@ func (f *File) applyDefaults() {
 	}
 	if f.Meta.GraphHost == "" {
 		f.Meta.GraphHost = d.Meta.GraphHost
+	}
+	if f.Meta.AppSecretRef == "" {
+		f.Meta.AppSecretRef = d.Meta.AppSecretRef
+	}
+	if f.Meta.OAuthPort == 0 {
+		f.Meta.OAuthPort = d.Meta.OAuthPort
+	}
+	if f.Google.ClientSecretRef == "" {
+		f.Google.ClientSecretRef = d.Google.ClientSecretRef
 	}
 	if f.R2.AccessKeyRef == "" {
 		f.R2.AccessKeyRef = d.R2.AccessKeyRef
@@ -251,6 +267,14 @@ func (f *File) Set(key, value string) error {
 		f.R2.SecretKeyRef = value
 	case "meta.app_id":
 		f.Meta.AppID = value
+	case "meta.app_secret_ref":
+		f.Meta.AppSecretRef = value
+	case "meta.oauth_port":
+		n, err := parsePositiveInt(value)
+		if err != nil {
+			return err
+		}
+		f.Meta.OAuthPort = n
 	case "meta.graph_version":
 		f.Meta.GraphVersion = value
 	case "meta.graph_host":

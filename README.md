@@ -44,11 +44,16 @@ goggles storage credentials --access-key ... --secret-key ...
 goggles storage test
 goggles storage cleanup
 
-goggles auth login instagram --alias patterns-instagram --access-token TOKEN --user-id IG_USER_ID --username patterns_app
+goggles auth setup instagram --app-id APP_ID --app-secret APP_SECRET
+goggles auth login instagram --alias patterns-instagram
+# or: --access-token TOKEN --user-id IG_USER_ID --username patterns_app
+
+Register `http://127.0.0.1:8787/callback` as the OAuth redirect URI in the Meta and Google consoles.
 goggles publish ./video.mp4 --destination patterns-instagram --caption "Hello" --json
 
-goggles account channels youtube --access-token GOOGLE_TOKEN
-goggles auth login youtube --alias patterns-youtube-main --access-token GOOGLE_TOKEN --channel-id UCabc123
+goggles auth setup youtube --client-id CLIENT_ID --client-secret CLIENT_SECRET
+goggles auth login youtube --alias patterns-youtube-main --channel-id UCabc123
+goggles account channels youtube --alias patterns-youtube-main
 goggles publish ./video.mp4 --destination patterns-youtube-main --title "Hello" --json
 
 goggles queue add ./video.mp4 --profile patterns

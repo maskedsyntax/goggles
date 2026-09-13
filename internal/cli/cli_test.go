@@ -170,4 +170,16 @@ func TestStorageMemoryFlow(t *testing.T) {
 	if !strings.Contains(stdout, "YOUTUBE_CHANNEL_REQUIRED") {
 		t.Fatalf("stdout=%s stderr=%s", stdout, stderr)
 	}
+
+	_, stderr, code = run(t, home, "auth", "setup", "instagram", "--app-id", "123", "--app-secret", "s3cret")
+	if code != 0 {
+		t.Fatalf("setup ig: %d %s", code, stderr)
+	}
+	stdout, stderr, code = run(t, home, "config", "show", "--json")
+	if code != 0 {
+		t.Fatalf("config show: %d %s", code, stderr)
+	}
+	if !strings.Contains(stdout, `"AppID": "123"`) && !strings.Contains(stdout, `"app_id"`) {
+		t.Fatalf("expected app id in config: %s", stdout)
+	}
 }
