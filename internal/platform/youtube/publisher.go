@@ -2,16 +2,20 @@ package youtube
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"strings"
 
 	"github.com/maskedsyntax/goggles/internal/apperr"
+	"github.com/maskedsyntax/goggles/internal/jobs"
 	"github.com/maskedsyntax/goggles/internal/media"
 	"github.com/maskedsyntax/goggles/internal/platform"
 )
 
 type Publisher struct {
 	API          API
+	DB           *sql.DB
+	JobID        string
 	SkipValidate bool
 }
 
@@ -50,7 +54,25 @@ func (p *Publisher) Publish(ctx context.Context, dest platform.Destination, m pl
 		return nil, apperr.New(apperr.YouTubeChannelNotFound, "authorized Google identity does not include channel "+dest.ExternalID)
 	}
 	vm := metaToVideo(m.Path, meta)
-	id, err := p.API.Upload(ctx, m.Path, vm)
+	resumeURI := ""
+	if p.DB != nil && p.JobID != "" {
+		if st, err := jobs.ProviderState(ctx, p.DB, p.JobID); err == nil {
+			resumeURI, _ = st["youtube_upload_session"].(string)
+		}
+	}
+	persist := func(uri string) {
+		if p.DB == nil || p.JobID == "" || uri == "" {
+			return
+		}
+		_ = jobs.MergeProviderState(ctx, p.DB, p.JobID, map[string]any{"youtube_upload_session": uri})
+		_ = jobs.SetStatus(ctx, p.DB, p.JobID, jobs.Uploading, nil, "", "")
+	}
+	var id string
+	if ru, ok := p.API.(ResumableUploader); ok {
+		id, err = ru.UploadResumable(ctx, m.Path, vm, resumeURI, persist)
+	} else {
+		id, err = p.API.Upload(ctx, m.Path, vm)
+	}
 	if err != nil {
 		return nil, err
 	}

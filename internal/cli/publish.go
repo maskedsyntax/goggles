@@ -6,7 +6,6 @@ import (
 
 	"github.com/maskedsyntax/goggles/internal/apperr"
 	"github.com/maskedsyntax/goggles/internal/platform"
-	ig "github.com/maskedsyntax/goggles/internal/platform/instagram"
 	"github.com/maskedsyntax/goggles/internal/publish"
 	"github.com/spf13/cobra"
 )
@@ -57,12 +56,7 @@ func newPublishCmd(app *App) *cobra.Command {
 					plats = append(plats, parsed)
 				}
 			}
-			runner := &publish.Runner{
-				DB:        app.DB,
-				Host:      host,
-				Keychain:  app.Keychain,
-				GraphBase: ig.GraphBase(app.Config.Meta.GraphHost, app.Config.Meta.GraphVersion),
-			}
+			runner := app.runner(host)
 			var tagList []string
 			for _, t := range strings.Split(tags, ",") {
 				t = strings.TrimSpace(t)

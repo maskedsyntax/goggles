@@ -88,3 +88,33 @@ func TestFindChannel(t *testing.T) {
 		t.Fatal("expected miss")
 	}
 }
+
+func TestResumeUpload(t *testing.T) {
+	puts := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("/upload-session", func(w http.ResponseWriter, r *http.Request) {
+		puts++
+		if r.Header.Get("Content-Range") == "bytes */4" {
+			w.Header().Set("Range", "bytes=0-1")
+			w.WriteHeader(308)
+			return
+		}
+		if strings.HasPrefix(r.Header.Get("Content-Range"), "bytes 2-") {
+			w.WriteHeader(201)
+			_ = json.NewEncoder(w).Encode(map[string]string{"id": "resumed"})
+			return
+		}
+		http.Error(w, "unexpected", 400)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	c := NewClient(srv.URL, "tok", srv.Client())
+	path := filepath.Join(t.TempDir(), "a.mp4")
+	if err := os.WriteFile(path, []byte("mp4x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	id, err := c.UploadResumable(context.Background(), path, VideoMeta{Title: "Hello"}, srv.URL+"/upload-session", nil)
+	if err != nil || id != "resumed" || puts != 2 {
+		t.Fatalf("id=%s puts=%d err=%v", id, puts, err)
+	}
+}

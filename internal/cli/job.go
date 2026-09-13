@@ -3,8 +3,6 @@ package cli
 import (
 	"github.com/maskedsyntax/goggles/internal/apperr"
 	"github.com/maskedsyntax/goggles/internal/jobs"
-	ig "github.com/maskedsyntax/goggles/internal/platform/instagram"
-	"github.com/maskedsyntax/goggles/internal/publish"
 	"github.com/spf13/cobra"
 )
 
@@ -84,8 +82,8 @@ func newJobCmd(app *App) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				if j.Status != jobs.Failed {
-					return apperr.Invalid("only failed jobs can be retried")
+				if j.Status != jobs.Failed && j.Status != jobs.RetryWait {
+					return apperr.Invalid("only failed or retry_wait jobs can be retried")
 				}
 				if app.DryRun {
 					return app.Out.Success(map[string]any{"dry_run": true, "id": j.ID, "destination": j.Destination})
@@ -94,14 +92,7 @@ func newJobCmd(app *App) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				runner := &publish.Runner{
-					DB: app.DB, Host: host, Keychain: app.Keychain,
-					GraphBase: ig.GraphBase(app.Config.Meta.GraphHost, app.Config.Meta.GraphVersion),
-				}
-				res, err := runner.Run(cmd.Context(), publish.Request{
-					Path:        j.SourceFilePath,
-					Destination: j.Destination,
-				})
+				res, err := app.runner(host).Retry(cmd.Context(), j)
 				if err != nil {
 					return err
 				}

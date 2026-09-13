@@ -37,6 +37,10 @@ type API interface {
 	VideoStatus(ctx context.Context, videoID string) (string, error)
 }
 
+type ResumableUploader interface {
+	UploadResumable(ctx context.Context, path string, meta VideoMeta, resumeURI string, persist func(string)) (string, error)
+}
+
 type Client struct {
 	BaseURL string
 	Token   string
@@ -74,6 +78,10 @@ func (c *Client) ListChannels(ctx context.Context) ([]Channel, error) {
 }
 
 func (c *Client) Upload(ctx context.Context, path string, meta VideoMeta) (string, error) {
+	return c.UploadResumable(ctx, path, meta, "", nil)
+}
+
+func (c *Client) UploadResumable(ctx context.Context, path string, meta VideoMeta, resumeURI string, persist func(string)) (string, error) {
 	if strings.TrimSpace(meta.Title) == "" {
 		return "", apperr.Invalid("YouTube title is required")
 	}
@@ -84,20 +92,39 @@ func (c *Client) Upload(ctx context.Context, path string, meta VideoMeta) (strin
 		}
 		return "", apperr.Wrap(apperr.FileUnreadable, "cannot stat file", err)
 	}
-	body, err := json.Marshal(videoResource(meta))
-	if err != nil {
-		return "", apperr.Wrap(apperr.YouTubeUploadFailed, "cannot encode video metadata", err)
+	session := strings.TrimSpace(resumeURI)
+	offset := int64(0)
+	if session != "" {
+		off, id, err := c.querySession(ctx, session, st.Size())
+		if err == nil && id != "" {
+			return id, nil
+		}
+		if err == nil {
+			offset = off
+		} else {
+			session = ""
+		}
 	}
-	session, err := c.startSession(ctx, body, st.Size())
-	if err != nil {
-		return "", err
+	if session == "" {
+		body, err := json.Marshal(videoResource(meta))
+		if err != nil {
+			return "", apperr.Wrap(apperr.YouTubeUploadFailed, "cannot encode video metadata", err)
+		}
+		session, err = c.startSession(ctx, body, st.Size())
+		if err != nil {
+			return "", err
+		}
+		if persist != nil {
+			persist(session)
+		}
+		offset = 0
 	}
 	f, err := os.Open(path)
 	if err != nil {
 		return "", apperr.Wrap(apperr.FileUnreadable, "cannot open file", err)
 	}
 	defer f.Close()
-	return c.putFile(ctx, session, f, st.Size())
+	return c.putFile(ctx, session, f, st.Size(), offset)
 }
 
 func (c *Client) VideoStatus(ctx context.Context, videoID string) (string, error) {
@@ -148,9 +175,12 @@ func (c *Client) startSession(ctx context.Context, metadata []byte, size int64) 
 	return ref.String(), nil
 }
 
-func (c *Client) putFile(ctx context.Context, session string, r io.ReadSeeker, size int64) (string, error) {
-	if _, err := r.Seek(0, io.SeekStart); err != nil {
-		return "", apperr.Wrap(apperr.YouTubeUploadFailed, "cannot rewind file", err)
+func (c *Client) putFile(ctx context.Context, session string, r io.ReadSeeker, size, offset int64) (string, error) {
+	if offset > size {
+		offset = 0
+	}
+	if _, err := r.Seek(offset, io.SeekStart); err != nil {
+		return "", apperr.Wrap(apperr.YouTubeUploadFailed, "cannot seek file", err)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodPut, session, r)
 	if err != nil {
@@ -158,10 +188,15 @@ func (c *Client) putFile(ctx context.Context, session string, r io.ReadSeeker, s
 	}
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 	req.Header.Set("Content-Type", "video/*")
-	req.ContentLength = size
+	if offset > 0 {
+		req.Header.Set("Content-Range", fmt.Sprintf("bytes %d-%d/%d", offset, size-1, size))
+		req.ContentLength = size - offset
+	} else {
+		req.ContentLength = size
+	}
 	res, err := c.HTTP.Do(req)
 	if err != nil {
-		return "", apperr.Wrap(apperr.YouTubeUploadFailed, "YouTube upload failed", err)
+		return "", apperr.WrapRetryable(apperr.YouTubeUploadFailed, "YouTube upload failed", err)
 	}
 	defer res.Body.Close()
 	b, _ := io.ReadAll(io.LimitReader(res.Body, 2<<20))
@@ -175,6 +210,61 @@ func (c *Client) putFile(ctx context.Context, session string, r io.ReadSeeker, s
 		return "", apperr.New(apperr.YouTubeUploadFailed, "YouTube upload response missing video id")
 	}
 	return out.ID, nil
+}
+
+func (c *Client) querySession(ctx context.Context, session string, size int64) (offset int64, videoID string, err error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPut, session, http.NoBody)
+	if err != nil {
+		return 0, "", apperr.Wrap(apperr.YouTubeUploadFailed, "cannot build resume query", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+c.Token)
+	req.Header.Set("Content-Range", fmt.Sprintf("bytes */%d", size))
+	req.ContentLength = 0
+	httpClient := c.HTTP
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	client := *httpClient
+	client.CheckRedirect = func(*http.Request, []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	res, err := client.Do(req)
+	if err != nil {
+		return 0, "", apperr.WrapRetryable(apperr.YouTubeUploadFailed, "YouTube resume query failed", err)
+	}
+	defer res.Body.Close()
+	b, _ := io.ReadAll(io.LimitReader(res.Body, 2<<20))
+	if res.StatusCode == http.StatusOK || res.StatusCode == http.StatusCreated {
+		var out struct {
+			ID string `json:"id"`
+		}
+		if err := json.Unmarshal(b, &out); err == nil && out.ID != "" {
+			return size, out.ID, nil
+		}
+	}
+	if res.StatusCode == 308 {
+		return parseResumeOffset(res.Header.Get("Range")), "", nil
+	}
+	if res.StatusCode == http.StatusNotFound {
+		return 0, "", apperr.New(apperr.YouTubeUploadFailed, "upload session expired")
+	}
+	if res.StatusCode >= 400 {
+		return 0, "", ytError(b, res.StatusCode)
+	}
+	return 0, "", nil
+}
+
+func parseResumeOffset(rangeHeader string) int64 {
+	// Range: bytes=0-999 means next byte is 1000.
+	s := strings.TrimSpace(rangeHeader)
+	s = strings.TrimPrefix(s, "bytes=")
+	if i := strings.LastIndex(s, "-"); i >= 0 {
+		n, err := strconv.ParseInt(s[i+1:], 10, 64)
+		if err == nil {
+			return n + 1
+		}
+	}
+	return 0
 }
 
 func (c *Client) get(ctx context.Context, path string, q url.Values, dest any) error {

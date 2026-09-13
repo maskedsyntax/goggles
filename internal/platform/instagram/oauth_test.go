@@ -44,3 +44,20 @@ func TestParseWrappedToken(t *testing.T) {
 		t.Fatalf("%+v %v", tok, err)
 	}
 }
+
+func TestRefresh(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Query().Get("grant_type") != "ig_refresh_token" {
+			w.WriteHeader(400)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "longer", "expires_in": 5184000})
+	}))
+	t.Cleanup(srv.Close)
+	refreshEndpoint = srv.URL
+	t.Cleanup(func() { refreshEndpoint = RefreshURL })
+	tok, err := Refresh(context.Background(), srv.Client(), "old")
+	if err != nil || tok.AccessToken != "longer" {
+		t.Fatalf("%+v %v", tok, err)
+	}
+}

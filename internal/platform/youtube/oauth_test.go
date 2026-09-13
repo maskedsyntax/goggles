@@ -32,3 +32,21 @@ func TestPKCE(t *testing.T) {
 		t.Fatalf("%+v", p)
 	}
 }
+
+func TestRefresh(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseForm()
+		if r.Form.Get("grant_type") != "refresh_token" || r.Form.Get("refresh_token") != "r1" {
+			w.WriteHeader(400)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(map[string]any{"access_token": "fresh", "expires_in": 3600})
+	}))
+	t.Cleanup(srv.Close)
+	tokenEndpoint = srv.URL
+	t.Cleanup(func() { tokenEndpoint = TokenURL })
+	tok, err := Refresh(context.Background(), srv.Client(), "cid", "sec", "r1")
+	if err != nil || tok.AccessToken != "fresh" || tok.RefreshToken != "r1" {
+		t.Fatalf("%+v %v", tok, err)
+	}
+}

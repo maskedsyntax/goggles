@@ -108,6 +108,19 @@ func Wrap(code Code, message string, err error) *Error {
 	return &Error{Code: code, Message: message, Err: err}
 }
 
+func WrapRetryable(code Code, message string, err error) *Error {
+	e := Wrap(code, message, err)
+	e.Retryable = true
+	return e
+}
+
+func IsRetryable(err error) bool {
+	if e, ok := As(err); ok {
+		return e.Retryable
+	}
+	return false
+}
+
 func Invalid(message string) *Error {
 	return New(InvalidInput, message)
 }

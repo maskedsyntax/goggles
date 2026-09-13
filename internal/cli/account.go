@@ -7,6 +7,7 @@ import (
 	"github.com/maskedsyntax/goggles/internal/account"
 	"github.com/maskedsyntax/goggles/internal/apperr"
 	"github.com/maskedsyntax/goggles/internal/platform"
+	ig "github.com/maskedsyntax/goggles/internal/platform/instagram"
 	yt "github.com/maskedsyntax/goggles/internal/platform/youtube"
 	"github.com/spf13/cobra"
 )
@@ -147,7 +148,56 @@ func newAccountCmd(app *App) *cobra.Command {
 			Use:   "test <alias>",
 			Short: "Test live credentials for an account",
 			Args:  cobra.ExactArgs(1),
-			RunE:  notImplemented("account test"),
+			RunE: func(cmd *cobra.Command, args []string) error {
+				if err := app.openDB(); err != nil {
+					return err
+				}
+				pair, err := account.GetByAlias(cmd.Context(), app.DB, args[0])
+				if err != nil {
+					return err
+				}
+				if app.DryRun {
+					return app.Out.Success(map[string]any{"dry_run": true, "alias": args[0], "platform": pair.Account.Platform})
+				}
+				tok, err := app.tokens().Access(cmd.Context(), pair.Account.Platform, pair.Account.ID)
+				if err != nil {
+					return err
+				}
+				out := map[string]any{
+					"alias":       pair.Account.Alias,
+					"platform":    pair.Account.Platform,
+					"external_id": pair.Destination.ExternalID,
+					"ok":          true,
+				}
+				switch pair.Account.Platform {
+				case platform.Instagram:
+					client := ig.NewClient(ig.GraphBase(app.Config.Meta.GraphHost, app.Config.Meta.GraphVersion), tok, nil)
+					id, user, err := client.Me(cmd.Context())
+					if err != nil {
+						return err
+					}
+					out["user_id"] = id
+					out["username"] = user
+					if pair.Destination.ExternalID != "" && pair.Destination.ExternalID != id && pair.Destination.ExternalID != user {
+						return apperr.New(apperr.AuthRequired, "token is valid but /me id "+id+" does not match destination "+pair.Destination.ExternalID)
+					}
+				case platform.YouTube:
+					client := yt.NewClient("", tok, nil)
+					chs, err := client.ListChannels(cmd.Context())
+					if err != nil {
+						return err
+					}
+					ch, ok := yt.FindChannel(chs, pair.Destination.ExternalID)
+					if !ok {
+						return apperr.New(apperr.YouTubeChannelNotFound, "authorized Google identity does not include channel "+pair.Destination.ExternalID)
+					}
+					out["channel_id"] = ch.ID
+					out["channel_title"] = ch.Title
+				default:
+					return apperr.NotImpl(string(pair.Account.Platform) + " account test")
+				}
+				return app.Out.Success(out)
+			},
 		},
 		newAccountChannelsCmd(app),
 	)
@@ -189,9 +239,9 @@ func newAccountChannelsCmd(app *App) *cobra.Command {
 				if err != nil {
 					return err
 				}
-				token, err = app.Keychain.Get("youtube/" + pair.Account.ID)
+				token, err = app.tokens().Access(cmd.Context(), platform.YouTube, pair.Account.ID)
 				if err != nil {
-					return apperr.New(apperr.AuthRequired, "YouTube token missing for "+alias)
+					return err
 				}
 			}
 			if strings.TrimSpace(token) == "" {

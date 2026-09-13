@@ -18,12 +18,14 @@ const (
 	AuthorizeURL = "https://www.instagram.com/oauth/authorize"
 	TokenURL     = "https://api.instagram.com/oauth/access_token"
 	LongLivedURL = "https://graph.instagram.com/access_token"
+	RefreshURL   = "https://graph.instagram.com/refresh_access_token"
 	Scopes       = "instagram_business_basic,instagram_business_content_publish"
 )
 
 var (
 	tokenEndpoint     = TokenURL
 	longLivedEndpoint = LongLivedURL
+	refreshEndpoint   = RefreshURL
 )
 
 func AuthorizeURLWith(clientID, redirect, state string) string {
@@ -103,6 +105,37 @@ func ExchangeLongLived(ctx context.Context, httpClient *http.Client, clientSecre
 	}
 	if err := json.Unmarshal(body, &out); err != nil || out.AccessToken == "" {
 		return Token{}, apperr.New(apperr.AuthRequired, "cannot parse Instagram long-lived token")
+	}
+	return Token{AccessToken: out.AccessToken, ExpiresIn: out.ExpiresIn}, nil
+}
+
+func Refresh(ctx context.Context, httpClient *http.Client, accessToken string) (Token, error) {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	q := url.Values{
+		"grant_type":   {"ig_refresh_token"},
+		"access_token": {accessToken},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, refreshEndpoint+"?"+q.Encode(), nil)
+	if err != nil {
+		return Token{}, err
+	}
+	res, err := httpClient.Do(req)
+	if err != nil {
+		return Token{}, apperr.Wrap(apperr.AuthExpired, "Instagram token refresh failed", err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if res.StatusCode >= 400 {
+		return Token{}, apperr.New(apperr.AuthExpired, "Instagram token refresh HTTP "+res.Status)
+	}
+	var out struct {
+		AccessToken string `json:"access_token"`
+		ExpiresIn   int    `json:"expires_in"`
+	}
+	if err := json.Unmarshal(body, &out); err != nil || out.AccessToken == "" {
+		return Token{}, apperr.New(apperr.AuthExpired, "cannot parse Instagram refresh token")
 	}
 	return Token{AccessToken: out.AccessToken, ExpiresIn: out.ExpiresIn}, nil
 }

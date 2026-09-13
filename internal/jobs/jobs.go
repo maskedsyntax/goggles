@@ -3,7 +3,9 @@ package jobs
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/maskedsyntax/goggles/internal/apperr"
@@ -41,6 +43,8 @@ type Batch struct {
 	CompletedAt    string `json:"completed_at,omitempty"`
 }
 
+const MaxAttempts = 5
+
 type Job struct {
 	ID                  string `json:"id"`
 	BatchID             string `json:"batch_id"`
@@ -50,6 +54,7 @@ type Job struct {
 	AttemptCount        int    `json:"attempt_count"`
 	LastErrorCode       string `json:"last_error_code,omitempty"`
 	LastErrorMessage    string `json:"last_error_message,omitempty"`
+	ScheduledFor        string `json:"scheduled_for,omitempty"`
 	ExternalContainerID string `json:"external_container_id,omitempty"`
 	ExternalMediaID     string `json:"external_media_id,omitempty"`
 	CreatedAt           string `json:"created_at"`
@@ -123,6 +128,10 @@ func SetStatus(ctx context.Context, sqlDB *sql.DB, jobID, status string, err err
 	if status == Completed || status == Failed || status == Cancelled {
 		completed = now()
 	}
+	inc := 0
+	if status == Failed {
+		inc = 1
+	}
 	_, dbErr := sqlDB.ExecContext(ctx, `
 		UPDATE jobs SET
 			status = ?,
@@ -130,15 +139,148 @@ func SetStatus(ctx context.Context, sqlDB *sql.DB, jobID, status string, err err
 			last_error_message = ?,
 			external_media_id = COALESCE(NULLIF(?, ''), external_media_id),
 			external_container_id = COALESCE(NULLIF(?, ''), external_container_id),
-			attempt_count = attempt_count + 1,
+			attempt_count = attempt_count + ?,
 			updated_at = ?,
 			completed_at = CASE WHEN ? != '' THEN ? ELSE completed_at END
 		WHERE id = ?`,
-		status, nullIfEmpty(code), nullIfEmpty(msg), mediaID, containerID, now(), completed, completed, jobID)
+		status, nullIfEmpty(code), nullIfEmpty(msg), mediaID, containerID, inc, now(), completed, completed, jobID)
 	if dbErr != nil {
 		return apperr.Wrap(apperr.DatabaseError, "cannot update job", dbErr)
 	}
 	return nil
+}
+
+func Backoff(attempt int) time.Duration {
+	delays := []time.Duration{
+		time.Minute,
+		5 * time.Minute,
+		15 * time.Minute,
+		30 * time.Minute,
+		60 * time.Minute,
+	}
+	if attempt <= 0 {
+		return delays[0]
+	}
+	if attempt > len(delays) {
+		return delays[len(delays)-1]
+	}
+	return delays[attempt-1]
+}
+
+func ScheduleRetry(ctx context.Context, sqlDB *sql.DB, jobID string, fail error, after time.Time, mediaID, containerID string) error {
+	var code, msg string
+	if fail != nil {
+		if e, ok := apperr.As(fail); ok {
+			code = string(e.Code)
+			msg = e.Message
+		} else {
+			code = string(apperr.MetaRequestFailed)
+			msg = fail.Error()
+		}
+	}
+	_, err := sqlDB.ExecContext(ctx, `
+		UPDATE jobs SET
+			status = ?,
+			last_error_code = ?,
+			last_error_message = ?,
+			external_media_id = COALESCE(NULLIF(?, ''), external_media_id),
+			external_container_id = COALESCE(NULLIF(?, ''), external_container_id),
+			attempt_count = attempt_count + 1,
+			scheduled_for = ?,
+			updated_at = ?,
+			completed_at = NULL
+		WHERE id = ?`,
+		RetryWait, nullIfEmpty(code), nullIfEmpty(msg), mediaID, containerID,
+		after.UTC().Format(time.RFC3339Nano), now(), jobID)
+	if err != nil {
+		return apperr.Wrap(apperr.DatabaseError, "cannot schedule retry", err)
+	}
+	return nil
+}
+
+func ListDueRetries(ctx context.Context, sqlDB *sql.DB, at time.Time) ([]View, error) {
+	return listJobs(ctx, sqlDB, `
+		SELECT j.id, j.batch_id, j.destination_id, j.platform, j.status, j.attempt_count,
+			j.last_error_code, j.last_error_message, j.scheduled_for, j.external_container_id, j.external_media_id,
+			j.created_at, j.updated_at, j.completed_at, d.alias, b.source_file_path, b.content_hash
+		FROM jobs j
+		JOIN destinations d ON d.id = j.destination_id
+		JOIN batches b ON b.id = j.batch_id
+		WHERE j.status = ? AND j.scheduled_for IS NOT NULL AND j.scheduled_for <= ?
+		ORDER BY j.scheduled_for`, RetryWait, at.UTC().Format(time.RFC3339Nano))
+}
+
+func ListStale(ctx context.Context, sqlDB *sql.DB, olderThan time.Time) ([]View, error) {
+	return listJobs(ctx, sqlDB, `
+		SELECT j.id, j.batch_id, j.destination_id, j.platform, j.status, j.attempt_count,
+			j.last_error_code, j.last_error_message, j.scheduled_for, j.external_container_id, j.external_media_id,
+			j.created_at, j.updated_at, j.completed_at, d.alias, b.source_file_path, b.content_hash
+		FROM jobs j
+		JOIN destinations d ON d.id = j.destination_id
+		JOIN batches b ON b.id = j.batch_id
+		WHERE j.status IN (?, ?, ?) AND j.updated_at <= ?
+		ORDER BY j.updated_at`, Uploading, Processing, Publishing, olderThan.UTC().Format(time.RFC3339Nano))
+}
+
+func ProviderState(ctx context.Context, sqlDB *sql.DB, jobID string) (map[string]any, error) {
+	var raw string
+	err := sqlDB.QueryRowContext(ctx, `SELECT provider_state_json FROM jobs WHERE id = ?`, jobID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, apperr.New(apperr.JobNotFound, jobID)
+	}
+	if err != nil {
+		return nil, apperr.Wrap(apperr.DatabaseError, "cannot load provider state", err)
+	}
+	if strings.TrimSpace(raw) == "" || raw == "{}" {
+		return map[string]any{}, nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return map[string]any{}, nil
+	}
+	return m, nil
+}
+
+func MergeProviderState(ctx context.Context, sqlDB *sql.DB, jobID string, kv map[string]any) error {
+	if len(kv) == 0 {
+		return nil
+	}
+	cur, err := ProviderState(ctx, sqlDB, jobID)
+	if err != nil {
+		return err
+	}
+	if cur == nil {
+		cur = map[string]any{}
+	}
+	for k, v := range kv {
+		cur[k] = v
+	}
+	raw, err := json.Marshal(cur)
+	if err != nil {
+		return apperr.Wrap(apperr.DatabaseError, "cannot encode provider state", err)
+	}
+	_, err = sqlDB.ExecContext(ctx, `UPDATE jobs SET provider_state_json = ?, updated_at = ? WHERE id = ?`, string(raw), now(), jobID)
+	if err != nil {
+		return apperr.Wrap(apperr.DatabaseError, "cannot store provider state", err)
+	}
+	return nil
+}
+
+func listJobs(ctx context.Context, sqlDB *sql.DB, q string, args ...any) ([]View, error) {
+	rows, err := sqlDB.QueryContext(ctx, q, args...)
+	if err != nil {
+		return nil, apperr.Wrap(apperr.DatabaseError, "cannot list jobs", err)
+	}
+	defer rows.Close()
+	var out []View
+	for rows.Next() {
+		v, err := scanView(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, rows.Err()
 }
 
 func FinishBatch(ctx context.Context, sqlDB *sql.DB, batchID, status string) error {
@@ -209,7 +351,7 @@ type View struct {
 func List(ctx context.Context, sqlDB *sql.DB, f Filter) ([]View, error) {
 	q := `
 		SELECT j.id, j.batch_id, j.destination_id, j.platform, j.status, j.attempt_count,
-			j.last_error_code, j.last_error_message, j.external_container_id, j.external_media_id,
+			j.last_error_code, j.last_error_message, j.scheduled_for, j.external_container_id, j.external_media_id,
 			j.created_at, j.updated_at, j.completed_at, d.alias, b.source_file_path, b.content_hash
 		FROM jobs j
 		JOIN destinations d ON d.id = j.destination_id
@@ -248,7 +390,7 @@ func List(ctx context.Context, sqlDB *sql.DB, f Filter) ([]View, error) {
 func Get(ctx context.Context, sqlDB *sql.DB, jobID string) (View, error) {
 	row := sqlDB.QueryRowContext(ctx, `
 		SELECT j.id, j.batch_id, j.destination_id, j.platform, j.status, j.attempt_count,
-			j.last_error_code, j.last_error_message, j.external_container_id, j.external_media_id,
+			j.last_error_code, j.last_error_message, j.scheduled_for, j.external_container_id, j.external_media_id,
 			j.created_at, j.updated_at, j.completed_at, d.alias, b.source_file_path, b.content_hash
 		FROM jobs j
 		JOIN destinations d ON d.id = j.destination_id
@@ -348,13 +490,14 @@ func GetPublication(ctx context.Context, sqlDB *sql.DB, id string) (PubView, err
 
 func scanView(row interface{ Scan(dest ...any) error }) (View, error) {
 	var v View
-	var errCode, errMsg, container, media, completed sql.NullString
+	var errCode, errMsg, scheduled, container, media, completed sql.NullString
 	if err := row.Scan(&v.ID, &v.BatchID, &v.DestinationID, &v.Platform, &v.Status, &v.AttemptCount,
-		&errCode, &errMsg, &container, &media, &v.CreatedAt, &v.UpdatedAt, &completed, &v.Destination, &v.SourceFilePath, &v.ContentHash); err != nil {
+		&errCode, &errMsg, &scheduled, &container, &media, &v.CreatedAt, &v.UpdatedAt, &completed, &v.Destination, &v.SourceFilePath, &v.ContentHash); err != nil {
 		return View{}, err
 	}
 	v.LastErrorCode = errCode.String
 	v.LastErrorMessage = errMsg.String
+	v.ScheduledFor = scheduled.String
 	v.ExternalContainerID = container.String
 	v.ExternalMediaID = media.String
 	v.CompletedAt = completed.String

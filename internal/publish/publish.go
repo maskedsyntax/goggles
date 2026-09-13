@@ -73,14 +73,21 @@ type Result struct {
 	Jobs       []JobResult `json:"jobs"`
 }
 
+type TokenSource interface {
+	Access(ctx context.Context, p platform.Platform, accountID string) (string, error)
+}
+
 type Runner struct {
 	DB          *sql.DB
 	Host        storage.VideoHost
 	Keychain    keychain.Store
+	Tokens      TokenSource
 	GraphBase   string
 	YouTubeBase string
 	NewIGClient func(token string) instagram.API
 	NewYTClient func(token string) youtube.API
+	AutoRetry   bool
+	MaxAttempts int
 }
 
 func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
@@ -177,7 +184,7 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 
 	ok, fail := 0, 0
 	for _, d := range dests {
-		jr := r.runOne(ctx, batch.ID, d, platMedia, hash, req, sidecar)
+		jr := r.runOne(ctx, batch.ID, d, platMedia, hash, req, sidecar, nil)
 		out.Jobs = append(out.Jobs, jr)
 		if jr.Status == jobs.Completed {
 			ok++
@@ -200,14 +207,67 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 	return out, nil
 }
 
-func (r *Runner) runOne(ctx context.Context, batchID string, d account.Destination, m platform.Media, hash string, req Request, sidecar meta.File) JobResult {
-	jr := JobResult{Destination: d.Alias, Platform: string(d.Platform)}
-	job, err := jobs.CreateJob(ctx, r.DB, batchID, d.ID, d.Platform)
+func (r *Runner) Retry(ctx context.Context, v jobs.View) (*Result, error) {
+	req := Request{Path: v.SourceFilePath, Destination: v.Destination, AllowDuplicate: true}
+	sidecar, err := meta.LoadFor(req.Path)
 	if err != nil {
-		jr.Status = jobs.Failed
-		jr.ErrorCode = string(apperr.DatabaseError)
-		jr.ErrorMessage = err.Error()
-		return jr
+		return nil, apperr.Wrap(apperr.InvalidInput, "cannot read sidecar yaml", err)
+	}
+	req = overlayMedia(req, sidecar)
+	items, err := collectItems(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+	slide := req.SlideSeconds
+	if slide <= 0 {
+		slide = media.DefaultSlideSeconds
+	}
+	hash := items[0].Info.Hash
+	if media.IsCarousel(items) {
+		hash, err = media.HashCarousel(itemPaths(items), req.Audio, slide, req.ReplaceAudio)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if media.NeedsPrepare(items, req.Audio) {
+		workDir, err := os.MkdirTemp("", "goggles-carousel-*")
+		if err != nil {
+			return nil, apperr.Wrap(apperr.VideoInvalid, "cannot create carousel work directory", err)
+		}
+		defer os.RemoveAll(workDir)
+		items, err = media.Prepare(ctx, items, media.PrepareOpts{
+			Audio: req.Audio, SlideSeconds: slide, ReplaceAudio: req.ReplaceAudio, WorkDir: workDir,
+		})
+		if err != nil {
+			return nil, err
+		}
+	}
+	d, err := account.GetDestinationByAlias(ctx, r.DB, v.Destination)
+	if err != nil {
+		return nil, err
+	}
+	jr := r.runOne(ctx, v.BatchID, d, toPlatformMedia(items, hash), hash, req, sidecar, &v.Job)
+	out := &Result{SourceFile: req.Path, BatchID: v.BatchID, Jobs: []JobResult{jr}}
+	if jr.Status == jobs.Completed {
+		out.Success = true
+	}
+	return out, nil
+}
+
+func (r *Runner) runOne(ctx context.Context, batchID string, d account.Destination, m platform.Media, hash string, req Request, sidecar meta.File, existing *jobs.Job) JobResult {
+	jr := JobResult{Destination: d.Alias, Platform: string(d.Platform)}
+	var job jobs.Job
+	var err error
+	if existing != nil {
+		job = *existing
+	} else {
+		job, err = jobs.CreateJob(ctx, r.DB, batchID, d.ID, d.Platform)
+		if err != nil {
+			jr.Status = jobs.Failed
+			jr.ErrorCode = string(apperr.DatabaseError)
+			jr.ErrorMessage = err.Error()
+			return jr
+		}
 	}
 	jr.JobID = job.ID
 	req = overlaySidecar(req, sidecar, d.Alias, d.Platform)
@@ -258,7 +318,7 @@ func (r *Runner) runOne(ctx context.Context, batchID string, d account.Destinati
 		return jr
 	}
 
-	pub, err := r.publisherFor(d, job.ID)
+	pub, err := r.publisherFor(ctx, d, job.ID)
 	if err != nil {
 		jr.Status = jobs.Failed
 		code := apperr.NotImplemented
@@ -284,16 +344,7 @@ func (r *Runner) runOne(ctx context.Context, batchID string, d account.Destinati
 	}
 	res, err := pub.Publish(ctx, toPlatformDest(d), m, meta)
 	if err != nil {
-		jr.Status = jobs.Failed
-		if e, ok := apperr.As(err); ok {
-			jr.ErrorCode = string(e.Code)
-			jr.ErrorMessage = e.Message
-		} else {
-			jr.ErrorCode = string(apperr.MetaRequestFailed)
-			jr.ErrorMessage = err.Error()
-		}
-		_ = jobs.SetStatus(ctx, r.DB, job.ID, jobs.Failed, err, "", "")
-		return jr
+		return r.failJob(ctx, job, jr, err, "", "")
 	}
 	mediaID := ""
 	if res != nil {
@@ -319,8 +370,8 @@ func (r *Runner) runOne(ctx context.Context, batchID string, d account.Destinati
 	return jr
 }
 
-func (r *Runner) publisherFor(d account.Destination, jobID string) (platform.Publisher, error) {
-	token, err := r.token(d)
+func (r *Runner) publisherFor(ctx context.Context, d account.Destination, jobID string) (platform.Publisher, error) {
+	token, err := r.token(ctx, d)
 	if err != nil {
 		return nil, err
 	}
@@ -347,13 +398,23 @@ func (r *Runner) publisherFor(d account.Destination, jobID string) (platform.Pub
 			}
 			api = youtube.NewClient(base, token, nil)
 		}
-		return youtube.New(api), nil
+		p := youtube.New(api)
+		p.DB = r.DB
+		p.JobID = jobID
+		return p, nil
 	default:
 		return nil, apperr.NotImpl(string(d.Platform) + " publishing")
 	}
 }
 
-func (r *Runner) token(d account.Destination) (string, error) {
+func (r *Runner) token(ctx context.Context, d account.Destination) (string, error) {
+	if r.Tokens != nil {
+		tok, err := r.Tokens.Access(ctx, d.Platform, d.AccountID)
+		if err != nil {
+			return "", err
+		}
+		return tok, nil
+	}
 	if r.Keychain == nil {
 		return "", apperr.New(apperr.AuthRequired, "no keychain")
 	}
@@ -362,6 +423,34 @@ func (r *Runner) token(d account.Destination) (string, error) {
 		return "", apperr.New(apperr.AuthRequired, string(d.Platform)+" token missing for "+d.Alias)
 	}
 	return tok, nil
+}
+
+func (r *Runner) maxAttempts() int {
+	if r.MaxAttempts > 0 {
+		return r.MaxAttempts
+	}
+	return jobs.MaxAttempts
+}
+
+func (r *Runner) failJob(ctx context.Context, job jobs.Job, jr JobResult, err error, mediaID, containerID string) JobResult {
+	jr.Status = jobs.Failed
+	if e, ok := apperr.As(err); ok {
+		jr.ErrorCode = string(e.Code)
+		jr.ErrorMessage = e.Message
+	} else {
+		jr.ErrorCode = string(apperr.MetaRequestFailed)
+		jr.ErrorMessage = err.Error()
+	}
+	if r.AutoRetry && apperr.IsRetryable(err) {
+		next := job.AttemptCount + 1
+		if next < r.maxAttempts() {
+			_ = jobs.ScheduleRetry(ctx, r.DB, job.ID, err, time.Now().Add(jobs.Backoff(next)), mediaID, containerID)
+			jr.Status = jobs.RetryWait
+			return jr
+		}
+	}
+	_ = jobs.SetStatus(ctx, r.DB, job.ID, jobs.Failed, err, mediaID, containerID)
+	return jr
 }
 
 func (r *Runner) resolve(ctx context.Context, req Request) ([]account.Destination, error) {

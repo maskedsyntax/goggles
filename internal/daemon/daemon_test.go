@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/maskedsyntax/goggles/internal/account"
+	"github.com/maskedsyntax/goggles/internal/apperr"
 	"github.com/maskedsyntax/goggles/internal/db"
+	"github.com/maskedsyntax/goggles/internal/jobs"
 	"github.com/maskedsyntax/goggles/internal/platform"
 	"github.com/maskedsyntax/goggles/internal/queue"
 	"github.com/maskedsyntax/goggles/internal/schedule"
@@ -58,5 +60,48 @@ func TestTickPublishesDueSlotOnce(t *testing.T) {
 	}
 	if res.Fired != 0 || len(published) != 1 {
 		t.Fatalf("second tick %+v published=%v", res, published)
+	}
+}
+
+func TestTickRetriesDueJobs(t *testing.T) {
+	sqlDB, err := db.Open(filepath.Join(t.TempDir(), "goggles.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	ctx := context.Background()
+	pair, err := account.Add(ctx, sqlDB, account.AddInput{Platform: platform.YouTube, Alias: "yt", ChannelID: "UCabc", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	batch, err := jobs.CreateBatch(ctx, sqlDB, "/tmp/a.mp4", "hash")
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := jobs.CreateJob(ctx, sqlDB, batch.ID, pair.Destination.ID, platform.YouTube)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fail := apperr.New(apperr.YouTubeRateLimited, "slow")
+	fail.Retryable = true
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	if err := jobs.ScheduleRetry(ctx, sqlDB, job.ID, fail, now.Add(-time.Minute), "", ""); err != nil {
+		t.Fatal(err)
+	}
+	var retried []string
+	eng := &Engine{
+		DB:  sqlDB,
+		Now: func() time.Time { return now },
+		Retry: func(_ context.Context, j jobs.View) error {
+			retried = append(retried, j.ID)
+			return nil
+		},
+	}
+	res, err := eng.Tick(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Retried != 1 || len(retried) != 1 || retried[0] != job.ID {
+		t.Fatalf("tick %+v retried=%v job=%s", res, retried, job.ID)
 	}
 }

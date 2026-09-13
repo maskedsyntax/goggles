@@ -198,7 +198,7 @@ func (c *Client) Upload(ctx context.Context, path string) (*storage.HostedVideo,
 		return nil, err
 	}
 	if err := c.api.PutObject(ctx, key, f, storage.ContentType(path), st.Size()); err != nil {
-		return nil, apperr.Wrap(apperr.R2UploadFailed, "R2 upload failed", err)
+		return nil, apperr.WrapRetryable(apperr.R2UploadFailed, "R2 upload failed", err)
 	}
 	return &storage.HostedVideo{
 		ObjectKey: key,

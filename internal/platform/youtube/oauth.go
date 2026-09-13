@@ -96,3 +96,37 @@ func Exchange(ctx context.Context, httpClient *http.Client, clientID, clientSecr
 	}
 	return tok, nil
 }
+
+func Refresh(ctx context.Context, httpClient *http.Client, clientID, clientSecret, refreshToken string) (Token, error) {
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+	form := url.Values{
+		"client_id":     {clientID},
+		"client_secret": {clientSecret},
+		"grant_type":    {"refresh_token"},
+		"refresh_token": {refreshToken},
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(form.Encode()))
+	if err != nil {
+		return Token{}, err
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	res, err := httpClient.Do(req)
+	if err != nil {
+		return Token{}, apperr.Wrap(apperr.GoogleAuthFailed, "Google token refresh failed", err)
+	}
+	defer res.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(res.Body, 1<<20))
+	if res.StatusCode >= 400 {
+		return Token{}, apperr.New(apperr.AuthExpired, "Google token refresh HTTP "+res.Status)
+	}
+	var tok Token
+	if err := json.Unmarshal(body, &tok); err != nil || tok.AccessToken == "" {
+		return Token{}, apperr.New(apperr.AuthExpired, "cannot parse Google refresh response")
+	}
+	if tok.RefreshToken == "" {
+		tok.RefreshToken = refreshToken
+	}
+	return tok, nil
+}

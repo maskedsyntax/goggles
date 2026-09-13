@@ -109,6 +109,21 @@ func TestConfigAndProfileFlow(t *testing.T) {
 	}
 }
 
+func TestAccountTestRequiresAuth(t *testing.T) {
+	home := t.TempDir()
+	_, stderr, code := run(t, home, "account", "add", "instagram", "--alias", "patterns-instagram", "--username", "patterns_app")
+	if code != 0 {
+		t.Fatalf("add: %d %s", code, stderr)
+	}
+	stdout, _, code := run(t, home, "account", "test", "patterns-instagram", "--json")
+	if code == 0 {
+		t.Fatal("expected auth required")
+	}
+	if !strings.Contains(stdout, "AUTH_REQUIRED") {
+		t.Fatalf("stdout=%s", stdout)
+	}
+}
+
 func TestJSONStdoutOnly(t *testing.T) {
 	home := t.TempDir()
 	stdout, stderr, code := run(t, home, "profile", "show", "missing", "--json")

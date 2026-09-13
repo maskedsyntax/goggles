@@ -36,11 +36,12 @@ func newAuthCmd(app *App) *cobra.Command {
 			if err := app.openDB(); err != nil {
 				return err
 			}
+			var expires time.Time
 			if strings.TrimSpace(token) == "" {
 				if app.NonInteractive {
 					return apperr.New(apperr.AuthRequired, "pass --access-token in non-interactive mode")
 				}
-				token, userID, username, err = app.browserLogin(cmd, p, noBrowser, port)
+				token, userID, username, expires, err = app.browserLogin(cmd, p, noBrowser, port)
 				if err != nil {
 					return err
 				}
@@ -117,6 +118,9 @@ func newAuthCmd(app *App) *cobra.Command {
 			}
 			if refresh != "" {
 				_ = app.Keychain.Set(ref+"/refresh", refresh)
+			}
+			if !expires.IsZero() {
+				_ = app.Keychain.Set(ref+"/expires", expires.UTC().Format(time.RFC3339))
 			}
 			if err := account.SetCredentialRef(cmd.Context(), app.DB, pair.Account.ID, "keychain:"+ref); err != nil {
 				return err
@@ -247,6 +251,7 @@ func newAuthLogoutCmd(app *App) *cobra.Command {
 			ref := string(pair.Account.Platform) + "/" + pair.Account.ID
 			_ = app.Keychain.Delete(ref)
 			_ = app.Keychain.Delete(ref + "/refresh")
+			_ = app.Keychain.Delete(ref + "/expires")
 			if err := account.SetCredentialRef(cmd.Context(), app.DB, pair.Account.ID, ""); err != nil {
 				return err
 			}
@@ -257,7 +262,7 @@ func newAuthLogoutCmd(app *App) *cobra.Command {
 	return cmd
 }
 
-func (a *App) browserLogin(cmd *cobra.Command, p platform.Platform, noBrowser bool, port int) (token, userID, username string, err error) {
+func (a *App) browserLogin(cmd *cobra.Command, p platform.Platform, noBrowser bool, port int) (token, userID, username string, expires time.Time, err error) {
 	if port == 0 {
 		port = a.Config.Meta.OAuthPort
 	}
@@ -267,7 +272,7 @@ func (a *App) browserLogin(cmd *cobra.Command, p platform.Platform, noBrowser bo
 	state := oauth.NewState()
 	sess, err := oauth.Listen(port, state)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", time.Time{}, err
 	}
 	defer sess.Close()
 	redirect := sess.Redirect
@@ -277,22 +282,22 @@ func (a *App) browserLogin(cmd *cobra.Command, p platform.Platform, noBrowser bo
 	switch p {
 	case platform.Instagram:
 		if a.Config.Meta.AppID == "" {
-			return "", "", "", apperr.New(apperr.ConfigMissing, "set Instagram app id via goggles auth setup instagram")
+			return "", "", "", time.Time{}, apperr.New(apperr.ConfigMissing, "set Instagram app id via goggles auth setup instagram")
 		}
 		secret, err := keychain.GetRef(a.Keychain, a.Config.Meta.AppSecretRef, "goggles-meta-app-secret", "GOGGLES_META_APP_SECRET")
 		if err != nil {
-			return "", "", "", err
+			return "", "", "", time.Time{}, err
 		}
 		authURL = ig.AuthorizeURLWith(a.Config.Meta.AppID, redirect, state)
 		_ = secret // validated above
 	case platform.YouTube:
 		if a.Config.Google.ClientID == "" {
-			return "", "", "", apperr.New(apperr.ConfigMissing, "set Google client id via goggles auth setup youtube")
+			return "", "", "", time.Time{}, apperr.New(apperr.ConfigMissing, "set Google client id via goggles auth setup youtube")
 		}
 		ytPKCE = yt.NewPKCE()
 		authURL = yt.AuthorizeURLWith(a.Config.Google.ClientID, redirect, state, ytPKCE.Challenge)
 	default:
-		return "", "", "", apperr.NotImpl(string(p) + " browser login")
+		return "", "", "", time.Time{}, apperr.NotImpl(string(p) + " browser login")
 	}
 
 	if noBrowser || a.JSON {
@@ -313,39 +318,47 @@ func (a *App) browserLogin(cmd *cobra.Command, p platform.Platform, noBrowser bo
 
 	code, err := sess.Wait(cmd.Context(), 5*time.Minute)
 	if err != nil {
-		return "", "", "", err
+		return "", "", "", time.Time{}, err
 	}
 
 	switch p {
 	case platform.Instagram:
 		secret, err := keychain.GetRef(a.Keychain, a.Config.Meta.AppSecretRef, "goggles-meta-app-secret", "GOGGLES_META_APP_SECRET")
 		if err != nil {
-			return "", "", "", err
+			return "", "", "", time.Time{}, err
 		}
 		tok, err := ig.Exchange(cmd.Context(), nil, a.Config.Meta.AppID, secret, redirect, code)
 		if err != nil {
-			return "", "", "", err
+			return "", "", "", time.Time{}, err
 		}
+		exp := time.Time{}
 		if long, err := ig.ExchangeLongLived(cmd.Context(), nil, secret, tok.AccessToken); err == nil && long.AccessToken != "" {
 			tok.AccessToken = long.AccessToken
+			if long.ExpiresIn > 0 {
+				exp = time.Now().Add(time.Duration(long.ExpiresIn) * time.Second)
+			}
 		}
-		return tok.AccessToken, tok.UserID, "", nil
+		return tok.AccessToken, tok.UserID, "", exp, nil
 	case platform.YouTube:
 		secret, err := keychain.GetRef(a.Keychain, a.Config.Google.ClientSecretRef, "goggles-google-client-secret", "GOGGLES_GOOGLE_CLIENT_SECRET")
 		if err != nil {
-			return "", "", "", err
+			return "", "", "", time.Time{}, err
 		}
 		tok, err := yt.Exchange(cmd.Context(), nil, a.Config.Google.ClientID, secret, redirect, code, ytPKCE.Verifier)
 		if err != nil {
-			return "", "", "", err
+			return "", "", "", time.Time{}, err
 		}
 		packed := tok.AccessToken
 		if tok.RefreshToken != "" {
 			packed = tok.AccessToken + "\n" + tok.RefreshToken
 		}
-		return packed, "", "", nil
+		exp := time.Time{}
+		if tok.ExpiresIn > 0 {
+			exp = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
+		}
+		return packed, "", "", exp, nil
 	default:
-		return "", "", "", apperr.NotImpl(string(p) + " browser login")
+		return "", "", "", time.Time{}, apperr.NotImpl(string(p) + " browser login")
 	}
 }
 

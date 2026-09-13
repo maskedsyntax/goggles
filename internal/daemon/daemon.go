@@ -6,7 +6,9 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/maskedsyntax/goggles/internal/account"
 	"github.com/maskedsyntax/goggles/internal/apperr"
+	"github.com/maskedsyntax/goggles/internal/jobs"
 	"github.com/maskedsyntax/goggles/internal/publish"
 	"github.com/maskedsyntax/goggles/internal/queue"
 	"github.com/maskedsyntax/goggles/internal/schedule"
@@ -15,22 +17,28 @@ import (
 
 const DefaultWindow = 15 * time.Minute
 const DefaultInterval = 30 * time.Second
+const DefaultStale = 10 * time.Minute
 
 type Engine struct {
-	DB       *sql.DB
-	Log      *slog.Logger
-	Runner   *publish.Runner
-	Host     storage.VideoHost
-	Now      func() time.Time
-	Window   time.Duration
-	Interval time.Duration
-	Publish  func(ctx context.Context, destAlias string, item queue.Item) error
+	DB         *sql.DB
+	Log        *slog.Logger
+	Runner     *publish.Runner
+	Host       storage.VideoHost
+	Now        func() time.Time
+	Window     time.Duration
+	Interval   time.Duration
+	StaleAfter time.Duration
+	Publish    func(ctx context.Context, destAlias string, item queue.Item) error
+	Retry      func(ctx context.Context, job jobs.View) error
 }
 
 type TickResult struct {
-	Fired   int `json:"fired"`
-	Failed  int `json:"failed"`
-	Cleaned int `json:"cleaned"`
+	Fired     int `json:"fired"`
+	Failed    int `json:"failed"`
+	Cleaned   int `json:"cleaned"`
+	Retried   int `json:"retried,omitempty"`
+	Recovered int `json:"recovered,omitempty"`
+	Refreshed int `json:"refreshed,omitempty"`
 }
 
 func (e *Engine) now() time.Time {
@@ -69,6 +77,13 @@ func (e *Engine) Run(ctx context.Context) error {
 	}
 }
 
+func (e *Engine) staleAfter() time.Duration {
+	if e.StaleAfter > 0 {
+		return e.StaleAfter
+	}
+	return DefaultStale
+}
+
 func (e *Engine) Tick(ctx context.Context) (TickResult, error) {
 	var res TickResult
 	n, f, err := e.processOneOffs(ctx)
@@ -83,6 +98,19 @@ func (e *Engine) Tick(ctx context.Context) (TickResult, error) {
 	if err != nil {
 		return res, err
 	}
+	n, f, err = e.processRetries(ctx)
+	res.Retried += n
+	res.Failed += f
+	if err != nil {
+		return res, err
+	}
+	n, f, err = e.recoverStale(ctx)
+	res.Recovered += n
+	res.Failed += f
+	if err != nil {
+		return res, err
+	}
+	res.Refreshed = e.refreshTokens(ctx)
 	if e.Host != nil {
 		cr, err := storage.Cleanup(ctx, e.DB, e.Host, e.now().UTC(), false)
 		if err != nil && e.Log != nil {
@@ -239,4 +267,88 @@ func (e *Engine) publishItem(ctx context.Context, destAlias string, item queue.I
 		return apperr.New(apperr.MetaRequestFailed, msg)
 	}
 	return nil
+}
+
+func (e *Engine) processRetries(ctx context.Context) (fired, failed int, err error) {
+	due, err := jobs.ListDueRetries(ctx, e.DB, e.now())
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, job := range due {
+		if err := e.retryJob(ctx, job); err != nil {
+			failed++
+			if e.Log != nil {
+				e.Log.Error("job retry failed", "job", job.ID, "err", err)
+			}
+			continue
+		}
+		fired++
+	}
+	return fired, failed, nil
+}
+
+func (e *Engine) recoverStale(ctx context.Context) (fired, failed int, err error) {
+	stale, err := jobs.ListStale(ctx, e.DB, e.now().Add(-e.staleAfter()))
+	if err != nil {
+		return 0, 0, err
+	}
+	for _, job := range stale {
+		if err := e.retryJob(ctx, job); err != nil {
+			failed++
+			if e.Log != nil {
+				e.Log.Error("stale job recovery failed", "job", job.ID, "err", err)
+			}
+			continue
+		}
+		fired++
+	}
+	return fired, failed, nil
+}
+
+func (e *Engine) retryJob(ctx context.Context, job jobs.View) error {
+	if e.Retry != nil {
+		return e.Retry(ctx, job)
+	}
+	if e.Runner == nil {
+		return apperr.New(apperr.DaemonUnavailable, "publish runner is not configured")
+	}
+	res, err := e.Runner.Retry(ctx, job)
+	if err != nil {
+		return err
+	}
+	if res != nil && res.Success {
+		return nil
+	}
+	if res != nil && len(res.Jobs) > 0 && res.Jobs[0].Status == jobs.RetryWait {
+		return nil
+	}
+	msg := "retry failed"
+	if res != nil && len(res.Jobs) > 0 && res.Jobs[0].ErrorMessage != "" {
+		msg = res.Jobs[0].ErrorMessage
+	}
+	return apperr.New(apperr.MetaRequestFailed, msg)
+}
+
+func (e *Engine) refreshTokens(ctx context.Context) int {
+	if e.Runner == nil || e.Runner.Tokens == nil {
+		return 0
+	}
+	pairs, err := account.List(ctx, e.DB)
+	if err != nil {
+		return 0
+	}
+	n := 0
+	for _, p := range pairs {
+		if p.Account.CredentialRef == "" {
+			continue
+		}
+		if _, err := e.Runner.Tokens.Access(ctx, p.Account.Platform, p.Account.ID); err != nil {
+			if e.Log != nil {
+				e.Log.Warn("token refresh failed", "alias", p.Account.Alias, "err", err)
+			}
+			continue
+		}
+		n++
+	}
+	return n
 }

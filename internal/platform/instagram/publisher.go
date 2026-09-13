@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/maskedsyntax/goggles/internal/apperr"
+	"github.com/maskedsyntax/goggles/internal/jobs"
 	"github.com/maskedsyntax/goggles/internal/media"
 	"github.com/maskedsyntax/goggles/internal/platform"
 	"github.com/maskedsyntax/goggles/internal/storage"
@@ -66,6 +67,9 @@ func (p *Publisher) Publish(ctx context.Context, dest platform.Destination, m pl
 	if err := p.Validate(ctx, dest, m, meta); err != nil {
 		return nil, err
 	}
+	if res, ok, err := p.resumeContainer(ctx, dest); ok {
+		return res, err
+	}
 	if len(m.Items) >= 2 {
 		return p.publishCarousel(ctx, dest, m, meta)
 	}
@@ -85,6 +89,7 @@ func (p *Publisher) Publish(ctx context.Context, dest platform.Destination, m pl
 		_ = p.Host.Delete(ctx, hosted.ObjectKey)
 		return nil, err
 	}
+	p.rememberContainer(ctx, containerID)
 	if err := p.waitFinished(ctx, containerID); err != nil {
 		_ = p.Host.Delete(ctx, hosted.ObjectKey)
 		return nil, err
@@ -149,6 +154,7 @@ func (p *Publisher) publishCarousel(ctx context.Context, dest platform.Destinati
 		cleanup()
 		return nil, err
 	}
+	p.rememberContainer(ctx, parentID)
 	if err := p.waitFinished(ctx, parentID); err != nil {
 		cleanup()
 		return nil, err
@@ -174,6 +180,35 @@ func (p *Publisher) publishCarousel(ctx context.Context, dest platform.Destinati
 		state["r2_keys"] = leftover
 	}
 	return &platform.PublishResult{ExternalMediaID: mediaID, ProviderState: state}, nil
+}
+
+func (p *Publisher) rememberContainer(ctx context.Context, containerID string) {
+	if p.DB == nil || p.JobID == "" || containerID == "" {
+		return
+	}
+	_ = jobs.SetStatus(ctx, p.DB, p.JobID, jobs.Processing, nil, "", containerID)
+	_ = jobs.MergeProviderState(ctx, p.DB, p.JobID, map[string]any{"container_id": containerID})
+}
+
+func (p *Publisher) resumeContainer(ctx context.Context, dest platform.Destination) (*platform.PublishResult, bool, error) {
+	if p.DB == nil || p.JobID == "" {
+		return nil, false, nil
+	}
+	v, err := jobs.Get(ctx, p.DB, p.JobID)
+	if err != nil || v.ExternalContainerID == "" {
+		return nil, false, nil
+	}
+	if err := p.waitFinished(ctx, v.ExternalContainerID); err != nil {
+		return nil, false, nil
+	}
+	mediaID, err := p.API.PublishContainer(ctx, dest.ExternalID, v.ExternalContainerID)
+	if err != nil {
+		return nil, true, err
+	}
+	return &platform.PublishResult{
+		ExternalMediaID: mediaID,
+		ProviderState:   map[string]any{"container_id": v.ExternalContainerID, "resumed": true},
+	}, true, nil
 }
 
 func itemIsImage(m platform.Media) bool {
@@ -215,10 +250,14 @@ func (p *Publisher) waitFinished(ctx context.Context, containerID string) error 
 		case "ERROR":
 			return apperr.New(apperr.InstagramProcessingFailed, "Instagram container processing failed")
 		case "EXPIRED":
-			return apperr.New(apperr.InstagramProcessingFailed, "Instagram container expired")
+			err := apperr.New(apperr.InstagramProcessingFailed, "Instagram container expired")
+			err.Retryable = true
+			return err
 		}
 		if time.Now().After(deadline) {
-			return apperr.New(apperr.JobTimeout, "timed out waiting for Instagram processing")
+			err := apperr.New(apperr.JobTimeout, "timed out waiting for Instagram processing")
+			err.Retryable = true
+			return err
 		}
 		select {
 		case <-ctx.Done():

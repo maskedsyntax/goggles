@@ -9,8 +9,6 @@ import (
 	"time"
 
 	"github.com/maskedsyntax/goggles/internal/daemon"
-	ig "github.com/maskedsyntax/goggles/internal/platform/instagram"
-	"github.com/maskedsyntax/goggles/internal/publish"
 	"github.com/spf13/cobra"
 )
 
@@ -30,16 +28,13 @@ func newDaemonCmd(app *App) *cobra.Command {
 			if err != nil {
 				return err
 			}
+			runner := app.runner(host)
+			runner.AutoRetry = true
 			eng := &daemon.Engine{
-				DB:   app.DB,
-				Log:  app.Log,
-				Host: host,
-				Runner: &publish.Runner{
-					DB:        app.DB,
-					Host:      host,
-					Keychain:  app.Keychain,
-					GraphBase: ig.GraphBase(app.Config.Meta.GraphHost, app.Config.Meta.GraphVersion),
-				},
+				DB:       app.DB,
+				Log:      app.Log,
+				Host:     host,
+				Runner:   runner,
 				Interval: interval,
 			}
 			if once {
