@@ -24,10 +24,6 @@ func stubTree(use, short string, children ...string) *cobra.Command {
 	return cmd
 }
 
-func newQueueCmd(_ *App) *cobra.Command {
-	return stubTree("queue", "Manage destination and profile queues", "add", "list", "fill", "remove", "clear", "pause", "resume")
-}
-
 func newScheduleCmd(_ *App) *cobra.Command {
 	return stubTree("schedule", "Recurring posting slots per destination", "set", "show", "clear", "enable", "disable")
 }

@@ -29,7 +29,7 @@ func TestOpenMigrates(t *testing.T) {
 	if err := sqlDB2.QueryRow(`SELECT COUNT(1) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 1 {
+	if n != 2 {
 		t.Fatalf("migrations = %d", n)
 	}
 }
