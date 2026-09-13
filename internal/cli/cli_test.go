@@ -126,3 +126,40 @@ func TestJSONStdoutOnly(t *testing.T) {
 		t.Fatalf("payload=%v", payload)
 	}
 }
+
+func TestStorageMemoryFlow(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("GOGGLES_STORAGE", "memory")
+	stdout, stderr, code := run(t, home, "storage", "status", "--json")
+	if code != 0 {
+		t.Fatalf("status: %d %s %s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, `"credentials": true`) {
+		t.Fatalf("status=%s", stdout)
+	}
+
+	path := filepath.Join(home, "probe.txt")
+	if err := os.WriteFile(path, []byte("probe"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stdout, stderr, code = run(t, home, "storage", "test", path, "--json")
+	if code != 0 {
+		t.Fatalf("test: %d %s %s", code, stdout, stderr)
+	}
+	if !strings.Contains(stdout, `"deleted": true`) {
+		t.Fatalf("test=%s", stdout)
+	}
+
+	_, stderr, code = run(t, home, "config", "set", "r2.account_id", "acc")
+	if code != 0 {
+		t.Fatalf("config: %d %s", code, stderr)
+	}
+	_, stderr, code = run(t, home, "storage", "credentials", "--access-key", "ak", "--secret-key", "sk")
+	if code != 0 {
+		t.Fatalf("creds: %d %s", code, stderr)
+	}
+	stdout, stderr, code = run(t, home, "storage", "cleanup", "--json")
+	if code != 0 {
+		t.Fatalf("cleanup: %d %s %s", code, stdout, stderr)
+	}
+}

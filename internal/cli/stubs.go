@@ -70,10 +70,6 @@ func newHistoryCmd(_ *App) *cobra.Command {
 	return stubTree("history", "Published items", "list", "show", "export")
 }
 
-func newStorageCmd(_ *App) *cobra.Command {
-	return stubTree("storage", "Temporary R2 hosting", "status", "test", "cleanup")
-}
-
 func newDaemonCmd(_ *App) *cobra.Command {
 	return stubTree("daemon", "Background scheduler", "run", "install", "uninstall", "status", "logs")
 }

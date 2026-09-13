@@ -1,12 +1,15 @@
 package cli
 
 import (
+	"context"
 	"os"
 	"os/exec"
 	"path/filepath"
 
 	"github.com/maskedsyntax/goggles/internal/apperr"
 	"github.com/maskedsyntax/goggles/internal/db"
+	"github.com/maskedsyntax/goggles/internal/storage"
+	"github.com/maskedsyntax/goggles/internal/storage/r2"
 	"github.com/spf13/cobra"
 )
 
@@ -31,7 +34,7 @@ func newDoctorCmd(app *App) *cobra.Command {
 				app.checkKeychain(),
 				checkBinary("ffprobe", true),
 				checkBinary("ffmpeg", false),
-				{Name: "r2", OK: app.Config.R2.Bucket != "" && app.Config.R2.AccountID != "", Required: false, Message: r2Message(app)},
+				app.checkR2(cmd.Context()),
 				{Name: "meta", OK: app.Config.Meta.AppID != "", Required: false, Message: emptyOr("Meta app id is not configured", app.Config.Meta.AppID != "", "Meta app id is set")},
 				{Name: "google", OK: app.Config.Google.ClientID != "", Required: false, Message: emptyOr("Google OAuth client id is not configured", app.Config.Google.ClientID != "", "Google client id is set")},
 				app.checkDestinations(),
@@ -142,11 +145,26 @@ func checkBinary(name string, required bool) doctorCheck {
 	return doctorCheck{Name: name, OK: true, Required: required, Message: path}
 }
 
-func r2Message(app *App) string {
-	if app.Config.R2.Bucket != "" && app.Config.R2.AccountID != "" {
-		return "R2 bucket configured"
+func (a *App) checkR2(ctx context.Context) doctorCheck {
+	if os.Getenv("GOGGLES_STORAGE") == "memory" {
+		return doctorCheck{Name: "r2", OK: true, Required: false, Message: "memory backend"}
 	}
-	return "R2 is not configured"
+	if !r2.Configured(a.Config) {
+		return doctorCheck{Name: "r2", OK: false, Required: false, Message: "R2 is not configured"}
+	}
+	if !r2.CredentialsPresent(a.Config.R2, a.Keychain) {
+		return doctorCheck{Name: "r2", OK: false, Required: false, Message: "R2 credentials missing"}
+	}
+	host, err := a.openHost(ctx)
+	if err != nil {
+		return doctorCheck{Name: "r2", OK: false, Required: false, Message: err.Error()}
+	}
+	if p, ok := host.(storage.Pinger); ok {
+		if err := p.Ping(ctx); err != nil {
+			return doctorCheck{Name: "r2", OK: false, Required: false, Message: err.Error()}
+		}
+	}
+	return doctorCheck{Name: "r2", OK: true, Required: false, Message: "R2 reachable"}
 }
 
 func emptyOr(empty string, ok bool, good string) string {

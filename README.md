@@ -8,7 +8,7 @@ See `spec.md` for the locked product specification.
 
 ## Status
 
-Phase 1 skeleton: config, SQLite, local accounts/profiles, media checks, and `doctor`. Instagram, YouTube, R2, queue, scheduler, and daemon come in later phases.
+Phase 2: config, SQLite, accounts/profiles, media checks, doctor, and Cloudflare R2 temporary hosting. Instagram/YouTube publish, queue, scheduler, and daemon come next.
 
 ## Requirements
 
@@ -36,6 +36,13 @@ goggles profile add-destination patterns patterns-youtube-main
 goggles profile show patterns --json
 
 goggles media check ./video.mp4 --profile patterns --json
+
+goggles config set r2.account_id YOUR_ACCOUNT_ID
+goggles config set r2.bucket goggles-temp
+goggles config set r2.public_base_url https://media.example.com
+goggles storage credentials --access-key ... --secret-key ...
+goggles storage test
+goggles storage cleanup
 ```
 
 Global flags: `--json`, `--dry-run`, `--verbose`, `--quiet`, `--non-interactive`.
