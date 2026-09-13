@@ -2,10 +2,12 @@ package cli
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/maskedsyntax/goggles/internal/account"
 	"github.com/maskedsyntax/goggles/internal/apperr"
 	"github.com/maskedsyntax/goggles/internal/platform"
+	yt "github.com/maskedsyntax/goggles/internal/platform/youtube"
 	"github.com/spf13/cobra"
 )
 
@@ -147,12 +149,7 @@ func newAccountCmd(app *App) *cobra.Command {
 			Args:  cobra.ExactArgs(1),
 			RunE:  notImplemented("account test"),
 		},
-		&cobra.Command{
-			Use:   "channels <platform>",
-			Short: "List YouTube channels for a Google identity",
-			Args:  cobra.ExactArgs(1),
-			RunE:  notImplemented("account channels"),
-		},
+		newAccountChannelsCmd(app),
 	)
 	return cmd
 }
@@ -168,6 +165,56 @@ func externalLabel(d account.Destination) string {
 		return d.ExternalID
 	}
 	return "-"
+}
+
+func newAccountChannelsCmd(app *App) *cobra.Command {
+	var token, alias string
+	cmd := &cobra.Command{
+		Use:   "channels <platform>",
+		Short: "List YouTube channels for a Google identity",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			p, err := platform.Parse(args[0])
+			if err != nil {
+				return err
+			}
+			if p != platform.YouTube {
+				return apperr.Invalid("channel listing is only supported for youtube")
+			}
+			if token == "" && alias != "" {
+				if err := app.openDB(); err != nil {
+					return err
+				}
+				pair, err := account.GetByAlias(cmd.Context(), app.DB, alias)
+				if err != nil {
+					return err
+				}
+				token, err = app.Keychain.Get("youtube/" + pair.Account.ID)
+				if err != nil {
+					return apperr.New(apperr.AuthRequired, "YouTube token missing for "+alias)
+				}
+			}
+			if strings.TrimSpace(token) == "" {
+				return apperr.Invalid("pass --access-token or --alias")
+			}
+			client := yt.NewClient("", token, nil)
+			chs, err := client.ListChannels(cmd.Context())
+			if err != nil {
+				return err
+			}
+			if app.JSON {
+				return app.Out.Success(map[string]any{"channels": chs})
+			}
+			rows := make([][]string, 0, len(chs))
+			for _, ch := range chs {
+				rows = append(rows, []string{ch.ID, ch.Title})
+			}
+			return app.Out.Table([]string{"CHANNEL ID", "TITLE"}, rows)
+		},
+	}
+	cmd.Flags().StringVar(&token, "access-token", "", "Google OAuth access token")
+	cmd.Flags().StringVar(&alias, "alias", "", "existing YouTube account alias")
+	return cmd
 }
 
 func firstNonEmpty(values ...string) string {

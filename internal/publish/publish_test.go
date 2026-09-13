@@ -12,6 +12,7 @@ import (
 	"github.com/maskedsyntax/goggles/internal/keychain"
 	"github.com/maskedsyntax/goggles/internal/platform"
 	"github.com/maskedsyntax/goggles/internal/platform/instagram"
+	"github.com/maskedsyntax/goggles/internal/platform/youtube"
 	"github.com/maskedsyntax/goggles/internal/storage"
 )
 
@@ -82,5 +83,59 @@ func TestPublishDestinationAndDuplicate(t *testing.T) {
 	}
 	if res2.Success || res2.Jobs[0].ErrorCode != "DUPLICATE_CONTENT" {
 		t.Fatalf("dup %+v", res2)
+	}
+}
+
+type ytStub struct{}
+
+func (ytStub) ListChannels(context.Context) ([]youtube.Channel, error) {
+	return []youtube.Channel{{ID: "UCabc", Title: "Patterns"}}, nil
+}
+func (ytStub) Upload(context.Context, string, youtube.VideoMeta) (string, error) {
+	return "ytvid", nil
+}
+func (ytStub) VideoStatus(context.Context, string) (string, error) { return "processed", nil }
+
+func TestPublishYouTube(t *testing.T) {
+	if _, err := exec.LookPath("ffmpeg"); err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	if _, err := exec.LookPath("ffprobe"); err != nil {
+		t.Skip("ffprobe not installed")
+	}
+	sqlDB, err := db.Open(filepath.Join(t.TempDir(), "goggles.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	ctx := context.Background()
+	pair, err := account.Add(ctx, sqlDB, account.AddInput{
+		Platform: platform.YouTube, Alias: "patterns-youtube-main", ChannelID: "UCabc", ChannelTitle: "Patterns", Enabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kc := keychain.NewMemory()
+	if err := kc.Set("youtube/"+pair.Account.ID, "tok"); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "reel.mp4")
+	cmd := exec.Command("ffmpeg", "-hide_banner", "-loglevel", "error",
+		"-f", "lavfi", "-i", "color=c=black:s=1080x1920:d=3:r=30",
+		"-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+		"-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-t", "3", "-y", path)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg: %v\n%s", err, out)
+	}
+	runner := &Runner{
+		DB: sqlDB, Host: storage.NewMemory("https://r2.test", time.Hour), Keychain: kc,
+		NewYTClient: func(string) youtube.API { return ytStub{} },
+	}
+	res, err := runner.Run(ctx, Request{Path: path, Destination: "patterns-youtube-main", Title: "Hello"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Success || res.Jobs[0].ExternalMediaID != "ytvid" {
+		t.Fatalf("%+v", res)
 	}
 }

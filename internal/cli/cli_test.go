@@ -162,4 +162,12 @@ func TestStorageMemoryFlow(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("cleanup: %d %s %s", code, stdout, stderr)
 	}
+
+	stdout, stderr, code = run(t, home, "auth", "login", "youtube", "--alias", "yt", "--access-token", "tok", "--json")
+	if code == 0 {
+		t.Fatalf("expected channel required, got %s", stdout)
+	}
+	if !strings.Contains(stdout, "YOUTUBE_CHANNEL_REQUIRED") {
+		t.Fatalf("stdout=%s stderr=%s", stdout, stderr)
+	}
 }

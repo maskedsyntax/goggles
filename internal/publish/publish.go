@@ -12,6 +12,7 @@ import (
 	"github.com/maskedsyntax/goggles/internal/media"
 	"github.com/maskedsyntax/goggles/internal/platform"
 	"github.com/maskedsyntax/goggles/internal/platform/instagram"
+	"github.com/maskedsyntax/goggles/internal/platform/youtube"
 	"github.com/maskedsyntax/goggles/internal/profile"
 	"github.com/maskedsyntax/goggles/internal/storage"
 )
@@ -25,6 +26,13 @@ type Request struct {
 	DryRun         bool
 	Caption        string
 	ShareToFeed    bool
+	Title          string
+	Description    string
+	Tags           []string
+	Privacy        string
+	CategoryID     string
+	MadeForKids    bool
+	PublishAt      string
 }
 
 type JobResult struct {
@@ -52,7 +60,9 @@ type Runner struct {
 	Host        storage.VideoHost
 	Keychain    keychain.Store
 	GraphBase   string
+	YouTubeBase string
 	NewIGClient func(token string) instagram.API
+	NewYTClient func(token string) youtube.API
 }
 
 func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
@@ -158,7 +168,17 @@ func (r *Runner) runOne(ctx context.Context, batchID string, d account.Destinati
 		return jr
 	}
 	_ = jobs.SetStatus(ctx, r.DB, job.ID, jobs.Publishing, nil, "", "")
-	meta := platform.PlatformMetadata{"caption": req.Caption, "share_to_feed": req.ShareToFeed}
+	meta := platform.PlatformMetadata{
+		"caption":       req.Caption,
+		"share_to_feed": req.ShareToFeed,
+		"title":         req.Title,
+		"description":   req.Description,
+		"tags":          req.Tags,
+		"privacy":       req.Privacy,
+		"category_id":   req.CategoryID,
+		"made_for_kids": req.MadeForKids,
+		"publish_at":    req.PublishAt,
+	}
 	res, err := pub.Publish(ctx, toPlatformDest(d), m, meta)
 	if err != nil {
 		jr.Status = jobs.Failed
@@ -197,12 +217,12 @@ func (r *Runner) runOne(ctx context.Context, batchID string, d account.Destinati
 }
 
 func (r *Runner) publisherFor(d account.Destination) (platform.Publisher, error) {
+	token, err := r.token(d)
+	if err != nil {
+		return nil, err
+	}
 	switch d.Platform {
 	case platform.Instagram:
-		token, err := r.token(d)
-		if err != nil {
-			return nil, err
-		}
 		var api instagram.API
 		if r.NewIGClient != nil {
 			api = r.NewIGClient(token)
@@ -213,7 +233,17 @@ func (r *Runner) publisherFor(d account.Destination) (platform.Publisher, error)
 		p.DB = r.DB
 		return p, nil
 	case platform.YouTube:
-		return nil, apperr.NotImpl("youtube publishing")
+		var api youtube.API
+		if r.NewYTClient != nil {
+			api = r.NewYTClient(token)
+		} else {
+			base := r.YouTubeBase
+			if base == "" {
+				base = "https://www.googleapis.com"
+			}
+			api = youtube.NewClient(base, token, nil)
+		}
+		return youtube.New(api), nil
 	default:
 		return nil, apperr.NotImpl(string(d.Platform) + " publishing")
 	}
@@ -223,9 +253,9 @@ func (r *Runner) token(d account.Destination) (string, error) {
 	if r.Keychain == nil {
 		return "", apperr.New(apperr.AuthRequired, "no keychain")
 	}
-	tok, err := r.Keychain.Get("instagram/" + d.AccountID)
+	tok, err := r.Keychain.Get(string(d.Platform) + "/" + d.AccountID)
 	if err != nil {
-		return "", apperr.New(apperr.AuthRequired, "Instagram token missing for "+d.Alias)
+		return "", apperr.New(apperr.AuthRequired, string(d.Platform)+" token missing for "+d.Alias)
 	}
 	return tok, nil
 }

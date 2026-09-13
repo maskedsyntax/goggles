@@ -8,7 +8,7 @@ See `spec.md` for the locked product specification.
 
 ## Status
 
-Phase 3: local accounts/profiles, media checks, R2 hosting, and Instagram Reel publish (token login + Graph container flow). YouTube upload, queue, scheduler, and daemon come next.
+Phase 4: Instagram Reels and YouTube Shorts immediate publish, R2 transport for Instagram, per-destination jobs and duplicate checks. Queue, scheduler, and daemon come next.
 
 ## Requirements
 
@@ -46,6 +46,10 @@ goggles storage cleanup
 
 goggles auth login instagram --alias patterns-instagram --access-token TOKEN --user-id IG_USER_ID --username patterns_app
 goggles publish ./video.mp4 --destination patterns-instagram --caption "Hello" --json
+
+goggles account channels youtube --access-token GOOGLE_TOKEN
+goggles auth login youtube --alias patterns-youtube-main --access-token GOOGLE_TOKEN --channel-id UCabc123
+goggles publish ./video.mp4 --destination patterns-youtube-main --title "Hello" --json
 ```
 
 Global flags: `--json`, `--dry-run`, `--verbose`, `--quiet`, `--non-interactive`.
