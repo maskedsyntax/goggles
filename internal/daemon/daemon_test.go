@@ -63,6 +63,38 @@ func TestTickPublishesDueSlotOnce(t *testing.T) {
 	}
 }
 
+func TestTickPublishesScheduledLinkedInText(t *testing.T) {
+	sqlDB, err := db.Open(filepath.Join(t.TempDir(), "goggles.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	ctx := context.Background()
+	if _, err := account.Add(ctx, sqlDB, account.AddInput{Platform: platform.LinkedIn, Alias: "li", UserID: "member", Enabled: true}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	item, err := queue.Add(ctx, sqlDB, queue.AddInput{Destination: "li", Caption: "Scheduled update", ScheduledFor: now.Add(time.Minute).Format(time.RFC3339)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var published []queue.Item
+	eng := &Engine{DB: sqlDB, Now: func() time.Time { return now }, Publish: func(_ context.Context, dest string, got queue.Item) error {
+		if dest != "li" {
+			t.Fatalf("destination %q", dest)
+		}
+		published = append(published, got)
+		return nil
+	}}
+	if tick, err := eng.Tick(ctx); err != nil || tick.Fired != 0 {
+		t.Fatalf("early tick=%+v err=%v", tick, err)
+	}
+	eng.Now = func() time.Time { return now.Add(time.Minute) }
+	if tick, err := eng.Tick(ctx); err != nil || tick.Fired != 1 || len(published) != 1 || published[0].Caption != "Scheduled update" || published[0].ID != item.ID {
+		t.Fatalf("due tick=%+v published=%+v err=%v", tick, published, err)
+	}
+}
+
 func TestTickRetriesDueJobs(t *testing.T) {
 	sqlDB, err := db.Open(filepath.Join(t.TempDir(), "goggles.db"))
 	if err != nil {

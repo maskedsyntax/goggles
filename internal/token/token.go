@@ -68,6 +68,10 @@ func (s *Source) Access(ctx context.Context, p platform.Platform, accountID stri
 			}
 			return tok.AccessToken, nil
 		}
+	case platform.LinkedIn:
+		if !exp.IsZero() && s.now().After(exp) {
+			return "", apperr.New(apperr.AuthExpired, "LinkedIn token expired; run goggles auth login linkedin again")
+		}
 	}
 	return access, nil
 }

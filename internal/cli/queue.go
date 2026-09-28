@@ -12,13 +12,17 @@ import (
 func newQueueCmd(app *App) *cobra.Command {
 	cmd := &cobra.Command{Use: "queue", Short: "Manage destination and profile queues"}
 
-	var profileName, dest, at, status string
+	var profileName, dest, at, status, caption, title string
 
 	add := &cobra.Command{
-		Use:   "add <file>",
-		Short: "Enqueue a video",
-		Args:  cobra.ExactArgs(1),
+		Use:   "add [file]",
+		Short: "Enqueue a media or LinkedIn text post",
+		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			path := ""
+			if len(args) > 0 {
+				path = args[0]
+			}
 			if err := app.openDB(); err != nil {
 				return err
 			}
@@ -27,10 +31,10 @@ func newQueueCmd(app *App) *cobra.Command {
 				return err
 			}
 			if app.DryRun {
-				return app.Out.Success(map[string]any{"dry_run": true, "path": args[0], "profile": profileName, "destination": dest})
+				return app.Out.Success(map[string]any{"dry_run": true, "path": path, "profile": profileName, "destination": dest, "caption": caption, "title": title})
 			}
 			item, err := queue.Add(cmd.Context(), app.DB, queue.AddInput{
-				Path: args[0], Profile: profileName, Destination: dest, ScheduledFor: scheduled,
+				Path: path, Profile: profileName, Destination: dest, ScheduledFor: scheduled, Caption: caption, Title: title,
 			})
 			if err != nil {
 				return err
@@ -41,6 +45,8 @@ func newQueueCmd(app *App) *cobra.Command {
 	add.Flags().StringVar(&profileName, "profile", "", "enqueue for a profile")
 	add.Flags().StringVar(&dest, "destination", "", "enqueue for one destination")
 	add.Flags().StringVar(&at, "at", "", "RFC3339 one-off time")
+	add.Flags().StringVar(&caption, "caption", "", "LinkedIn post text")
+	add.Flags().StringVar(&title, "title", "", "LinkedIn video title")
 
 	fill := &cobra.Command{
 		Use:   "fill <dir>",

@@ -3,6 +3,8 @@ package cli
 import (
 	"github.com/maskedsyntax/goggles/internal/apperr"
 	"github.com/maskedsyntax/goggles/internal/jobs"
+	"github.com/maskedsyntax/goggles/internal/platform"
+	"github.com/maskedsyntax/goggles/internal/storage"
 	"github.com/spf13/cobra"
 )
 
@@ -88,9 +90,12 @@ func newJobCmd(app *App) *cobra.Command {
 				if app.DryRun {
 					return app.Out.Success(map[string]any{"dry_run": true, "id": j.ID, "destination": j.Destination})
 				}
-				host, err := app.openHost(cmd.Context())
-				if err != nil {
-					return err
+				var host storage.VideoHost
+				if j.Platform == string(platform.Instagram) {
+					host, err = app.openHost(cmd.Context())
+					if err != nil {
+						return err
+					}
 				}
 				res, err := app.runner(host).Retry(cmd.Context(), j)
 				if err != nil {

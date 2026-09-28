@@ -59,6 +59,7 @@ type File struct {
 	R2         R2         `toml:"r2"`
 	Meta       Meta       `toml:"meta"`
 	Google     Google     `toml:"google"`
+	LinkedIn   LinkedIn   `toml:"linkedin"`
 }
 
 type General struct {
@@ -99,6 +100,12 @@ type Google struct {
 	ClientSecretRef string `toml:"client_secret_ref"`
 }
 
+type LinkedIn struct {
+	ClientID        string `toml:"client_id"`
+	ClientSecretRef string `toml:"client_secret_ref"`
+	APIVersion      string `toml:"api_version"`
+}
+
 func Default() File {
 	return File{
 		General: General{Timezone: "UTC"},
@@ -125,6 +132,7 @@ func Default() File {
 		Google: Google{
 			ClientSecretRef: "keychain:goggles-google-client-secret",
 		},
+		LinkedIn: LinkedIn{ClientSecretRef: "keychain:goggles-linkedin-client-secret", APIVersion: "202609"},
 	}
 }
 
@@ -175,6 +183,12 @@ func (f *File) applyDefaults() {
 	}
 	if f.Google.ClientSecretRef == "" {
 		f.Google.ClientSecretRef = d.Google.ClientSecretRef
+	}
+	if f.LinkedIn.ClientSecretRef == "" {
+		f.LinkedIn.ClientSecretRef = d.LinkedIn.ClientSecretRef
+	}
+	if f.LinkedIn.APIVersion == "" {
+		f.LinkedIn.APIVersion = d.LinkedIn.APIVersion
 	}
 	if f.R2.AccessKeyRef == "" {
 		f.R2.AccessKeyRef = d.R2.AccessKeyRef
@@ -283,6 +297,15 @@ func (f *File) Set(key, value string) error {
 		f.Google.ClientID = value
 	case "google.client_secret_ref":
 		f.Google.ClientSecretRef = value
+	case "linkedin.client_id":
+		f.LinkedIn.ClientID = value
+	case "linkedin.client_secret_ref":
+		f.LinkedIn.ClientSecretRef = value
+	case "linkedin.api_version":
+		if len(value) != 6 {
+			return apperr.Invalid("linkedin.api_version must be YYYYMM")
+		}
+		f.LinkedIn.APIVersion = value
 	default:
 		return apperr.Invalid("unknown config key " + key)
 	}

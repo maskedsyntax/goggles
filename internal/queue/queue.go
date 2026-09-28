@@ -2,7 +2,10 @@ package queue
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -15,6 +18,7 @@ import (
 	"github.com/maskedsyntax/goggles/internal/db"
 	"github.com/maskedsyntax/goggles/internal/id"
 	"github.com/maskedsyntax/goggles/internal/media"
+	"github.com/maskedsyntax/goggles/internal/platform"
 	"github.com/maskedsyntax/goggles/internal/profile"
 )
 
@@ -35,6 +39,8 @@ type Item struct {
 	Destination   string `json:"destination,omitempty"`
 	FilePath      string `json:"file_path"`
 	ContentHash   string `json:"content_hash"`
+	Caption       string `json:"caption,omitempty"`
+	Title         string `json:"title,omitempty"`
 	Status        string `json:"status"`
 	Position      int    `json:"position"`
 	ScheduledFor  string `json:"scheduled_for,omitempty"`
@@ -47,6 +53,8 @@ type AddInput struct {
 	Profile      string
 	Destination  string
 	ScheduledFor string
+	Caption      string
+	Title        string
 }
 
 func Add(ctx context.Context, sqlDB *sql.DB, in AddInput) (Item, error) {
@@ -56,23 +64,32 @@ func Add(ctx context.Context, sqlDB *sql.DB, in AddInput) (Item, error) {
 	if in.Profile == "" && in.Destination == "" {
 		return Item{}, apperr.Invalid("pass --profile or --destination")
 	}
-	st, err := os.Stat(in.Path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return Item{}, apperr.New(apperr.FileNotFound, in.Path)
+	abs, hash := "", ""
+	if in.Path != "" {
+		st, err := os.Stat(in.Path)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return Item{}, apperr.New(apperr.FileNotFound, in.Path)
+			}
+			return Item{}, apperr.Wrap(apperr.FileUnreadable, "cannot read file", err)
 		}
-		return Item{}, apperr.Wrap(apperr.FileUnreadable, "cannot read file", err)
-	}
-	if st.IsDir() {
-		return Item{}, apperr.Invalid("path is a directory; use queue fill")
-	}
-	abs, err := filepath.Abs(in.Path)
-	if err != nil {
-		abs = in.Path
-	}
-	hash, err := media.HashFile(abs)
-	if err != nil {
-		return Item{}, err
+		if st.IsDir() {
+			return Item{}, apperr.Invalid("path is a directory; use queue fill")
+		}
+		abs, err = filepath.Abs(in.Path)
+		if err != nil {
+			abs = in.Path
+		}
+		hash, err = media.HashFile(abs)
+		if err != nil {
+			return Item{}, err
+		}
+	} else {
+		if strings.TrimSpace(in.Caption) == "" {
+			return Item{}, apperr.Invalid("pass a file or --caption for a LinkedIn text post")
+		}
+		sum := sha256.Sum256([]byte("linkedin:text:" + in.Caption))
+		hash = hex.EncodeToString(sum[:])
 	}
 
 	var profileID, destID any
@@ -89,8 +106,21 @@ func Add(ctx context.Context, sqlDB *sql.DB, in AddInput) (Item, error) {
 		if err != nil {
 			return Item{}, err
 		}
+		if in.Path == "" && d.Platform != platform.LinkedIn {
+			return Item{}, apperr.Invalid("text-only queue items require a LinkedIn destination")
+		}
 		destID = d.ID
 		destAlias = d.Alias
+	}
+	if in.Path == "" && in.Profile != "" {
+		return Item{}, apperr.Invalid("text-only queue items require --destination")
+	}
+	metadata, err := json.Marshal(struct {
+		Caption string `json:"caption,omitempty"`
+		Title   string `json:"title,omitempty"`
+	}{in.Caption, in.Title})
+	if err != nil {
+		return Item{}, err
 	}
 
 	pos, err := nextPosition(ctx, sqlDB, profileID, destID)
@@ -104,6 +134,8 @@ func Add(ctx context.Context, sqlDB *sql.DB, in AddInput) (Item, error) {
 		Destination:  destAlias,
 		FilePath:     abs,
 		ContentHash:  hash,
+		Caption:      in.Caption,
+		Title:        in.Title,
 		Status:       Ready,
 		Position:     pos,
 		ScheduledFor: in.ScheduledFor,
@@ -120,8 +152,8 @@ func Add(ctx context.Context, sqlDB *sql.DB, in AddInput) (Item, error) {
 		INSERT INTO queue_items (
 			id, profile_id, destination_id, file_path, content_hash,
 			generic_metadata_json, platform_metadata_json, status, position, scheduled_for, created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, '{}', '{}', ?, ?, ?, ?, ?)`,
-		item.ID, profileID, destID, item.FilePath, item.ContentHash, item.Status, item.Position,
+		) VALUES (?, ?, ?, ?, ?, ?, '{}', ?, ?, ?, ?, ?)`,
+		item.ID, profileID, destID, item.FilePath, item.ContentHash, string(metadata), item.Status, item.Position,
 		nullIfEmpty(item.ScheduledFor), item.CreatedAt, item.UpdatedAt)
 	if err != nil {
 		return Item{}, apperr.Wrap(apperr.DatabaseError, "cannot enqueue", err)
@@ -172,7 +204,7 @@ type ListFilter struct {
 
 func List(ctx context.Context, sqlDB *sql.DB, f ListFilter) ([]Item, error) {
 	q := `
-		SELECT q.id, q.profile_id, q.destination_id, p.name, d.alias, q.file_path, q.content_hash,
+		SELECT q.id, q.profile_id, q.destination_id, p.name, d.alias, q.file_path, q.content_hash, q.generic_metadata_json,
 			q.status, q.position, q.scheduled_for, q.created_at, q.updated_at
 		FROM queue_items q
 		LEFT JOIN profiles p ON p.id = q.profile_id
@@ -313,10 +345,19 @@ func scanItem(row rowScanner) (Item, error) {
 		profileID, destID      sql.NullString
 		profileName, destAlias sql.NullString
 		scheduled              sql.NullString
+		metadata               string
 	)
-	if err := row.Scan(&it.ID, &profileID, &destID, &profileName, &destAlias, &it.FilePath, &it.ContentHash, &it.Status, &it.Position, &scheduled, &it.CreatedAt, &it.UpdatedAt); err != nil {
+	if err := row.Scan(&it.ID, &profileID, &destID, &profileName, &destAlias, &it.FilePath, &it.ContentHash, &metadata, &it.Status, &it.Position, &scheduled, &it.CreatedAt, &it.UpdatedAt); err != nil {
 		return Item{}, apperr.Wrap(apperr.DatabaseError, "cannot scan queue item", err)
 	}
+	var fields struct {
+		Caption string `json:"caption"`
+		Title   string `json:"title"`
+	}
+	if err := json.Unmarshal([]byte(metadata), &fields); err != nil {
+		return Item{}, apperr.Wrap(apperr.DatabaseError, "cannot read queue metadata", err)
+	}
+	it.Caption, it.Title = fields.Caption, fields.Title
 	it.ProfileID = profileID.String
 	it.DestinationID = destID.String
 	it.Profile = profileName.String
@@ -354,7 +395,7 @@ func SetStatus(ctx context.Context, sqlDB *sql.DB, itemID, status string) error 
 func NextDue(ctx context.Context, sqlDB *sql.DB, destID string, now time.Time) (Item, error) {
 	nowStr := now.UTC().Format(time.RFC3339)
 	row := sqlDB.QueryRowContext(ctx, `
-		SELECT q.id, q.profile_id, q.destination_id, p.name, d.alias, q.file_path, q.content_hash,
+		SELECT q.id, q.profile_id, q.destination_id, p.name, d.alias, q.file_path, q.content_hash, q.generic_metadata_json,
 			q.status, q.position, q.scheduled_for, q.created_at, q.updated_at
 		FROM queue_items q
 		LEFT JOIN profiles p ON p.id = q.profile_id

@@ -51,6 +51,8 @@ const (
 	YouTubeRateLimited      Code = "YOUTUBE_RATE_LIMITED"
 	YouTubeQuotaExceeded    Code = "YOUTUBE_QUOTA_EXCEEDED"
 	YouTubePublishFailed    Code = "YOUTUBE_PUBLISH_FAILED"
+	LinkedInRequestFailed   Code = "LINKEDIN_REQUEST_FAILED"
+	LinkedInUploadFailed    Code = "LINKEDIN_UPLOAD_FAILED"
 )
 
 const (

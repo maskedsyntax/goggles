@@ -2,6 +2,7 @@ package cli
 
 import (
 	"fmt"
+	"io"
 	"strings"
 	"time"
 
@@ -12,12 +13,13 @@ import (
 	"github.com/maskedsyntax/goggles/internal/oauth"
 	"github.com/maskedsyntax/goggles/internal/platform"
 	ig "github.com/maskedsyntax/goggles/internal/platform/instagram"
+	li "github.com/maskedsyntax/goggles/internal/platform/linkedin"
 	yt "github.com/maskedsyntax/goggles/internal/platform/youtube"
 	"github.com/spf13/cobra"
 )
 
 func newAuthCmd(app *App) *cobra.Command {
-	cmd := &cobra.Command{Use: "auth", Short: "Authenticate with Meta and Google"}
+	cmd := &cobra.Command{Use: "auth", Short: "Authenticate with Meta, Google, and LinkedIn"}
 	var alias, token, userID, username, channelID, channelTitle string
 	var noBrowser bool
 	var port int
@@ -102,6 +104,15 @@ func newAuthCmd(app *App) *cobra.Command {
 				in.ChannelID = channelID
 				in.ChannelTitle = channelTitle
 				in.DisplayName = channelTitle
+			case platform.LinkedIn:
+				if userID == "" {
+					userID, username, err = li.NewClient("", token, app.Config.LinkedIn.APIVersion, nil).Me(cmd.Context())
+					if err != nil {
+						return err
+					}
+				}
+				in.UserID = userID
+				in.DisplayName = username
 			default:
 				return apperr.NotImpl(string(p) + " login")
 			}
@@ -134,7 +145,7 @@ func newAuthCmd(app *App) *cobra.Command {
 	}
 	login.Flags().StringVar(&alias, "alias", "", "destination alias")
 	login.Flags().StringVar(&token, "access-token", "", "skip the browser and store this token")
-	login.Flags().StringVar(&userID, "user-id", "", "Instagram professional account id")
+	login.Flags().StringVar(&userID, "user-id", "", "Instagram account or LinkedIn member id")
 	login.Flags().StringVar(&username, "username", "", "Instagram username")
 	login.Flags().StringVar(&channelID, "channel-id", "", "YouTube channel ID")
 	login.Flags().StringVar(&channelTitle, "channel-title", "", "YouTube channel title")
@@ -147,11 +158,25 @@ func newAuthCmd(app *App) *cobra.Command {
 
 func newAuthSetupCmd(app *App) *cobra.Command {
 	var appID, appSecret, clientID, clientSecret string
+	var clientSecretStdin bool
 	cmd := &cobra.Command{
 		Use:   "setup <platform>",
 		Short: "Store OAuth app id and secret for browser login",
 		Args:  cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if clientSecretStdin {
+				if clientSecret != "" {
+					return apperr.Invalid("use either --client-secret or --client-secret-stdin")
+				}
+				data, err := io.ReadAll(io.LimitReader(cmd.InOrStdin(), 8193))
+				if err != nil {
+					return err
+				}
+				if len(data) > 8192 {
+					return apperr.Invalid("client secret is too long")
+				}
+				clientSecret = strings.TrimSpace(string(data))
+			}
 			p, err := platform.Parse(args[0])
 			if err != nil {
 				return err
@@ -178,6 +203,16 @@ func newAuthSetupCmd(app *App) *cobra.Command {
 				if err := keychain.SetRef(app.Keychain, cfg.Google.ClientSecretRef, "goggles-google-client-secret", clientSecret); err != nil {
 					return err
 				}
+			case platform.LinkedIn:
+				if clientID == "" || clientSecret == "" {
+					return apperr.Invalid("--client-id and --client-secret are required")
+				}
+				if err := cfg.Set("linkedin.client_id", clientID); err != nil {
+					return err
+				}
+				if err := keychain.SetRef(app.Keychain, cfg.LinkedIn.ClientSecretRef, "goggles-linkedin-client-secret", clientSecret); err != nil {
+					return err
+				}
 			default:
 				return apperr.NotImpl(string(p) + " setup")
 			}
@@ -190,8 +225,9 @@ func newAuthSetupCmd(app *App) *cobra.Command {
 	}
 	cmd.Flags().StringVar(&appID, "app-id", "", "Instagram app id")
 	cmd.Flags().StringVar(&appSecret, "app-secret", "", "Instagram app secret")
-	cmd.Flags().StringVar(&clientID, "client-id", "", "Google OAuth client id")
-	cmd.Flags().StringVar(&clientSecret, "client-secret", "", "Google OAuth client secret")
+	cmd.Flags().StringVar(&clientID, "client-id", "", "Google or LinkedIn OAuth client id")
+	cmd.Flags().StringVar(&clientSecret, "client-secret", "", "Google or LinkedIn OAuth client secret")
+	cmd.Flags().BoolVar(&clientSecretStdin, "client-secret-stdin", false, "read OAuth client secret from standard input")
 	return cmd
 }
 
@@ -208,7 +244,7 @@ func newAuthStatusCmd(app *App) *cobra.Command {
 			if err != nil {
 				return err
 			}
-			igCount, ytCount := 0, 0
+			igCount, ytCount, liCount := 0, 0, 0
 			for _, p := range pairs {
 				switch p.Account.Platform {
 				case platform.Instagram:
@@ -219,13 +255,19 @@ func newAuthStatusCmd(app *App) *cobra.Command {
 					if p.Account.CredentialRef != "" {
 						ytCount++
 					}
+				case platform.LinkedIn:
+					if p.Account.CredentialRef != "" {
+						liCount++
+					}
 				}
 			}
 			return app.Out.Success(map[string]any{
 				"instagram_accounts": igCount,
 				"youtube_accounts":   ytCount,
+				"linkedin_accounts":  liCount,
 				"instagram_app":      app.Config.Meta.AppID != "",
 				"google_client":      app.Config.Google.ClientID != "",
+				"linkedin_client":    app.Config.LinkedIn.ClientID != "",
 			})
 		},
 	}
@@ -296,6 +338,11 @@ func (a *App) browserLogin(cmd *cobra.Command, p platform.Platform, noBrowser bo
 		}
 		ytPKCE = yt.NewPKCE()
 		authURL = yt.AuthorizeURLWith(a.Config.Google.ClientID, redirect, state, ytPKCE.Challenge)
+	case platform.LinkedIn:
+		if a.Config.LinkedIn.ClientID == "" {
+			return "", "", "", time.Time{}, apperr.New(apperr.ConfigMissing, "set LinkedIn client id via goggles auth setup linkedin")
+		}
+		authURL = li.AuthorizeURL(a.Config.LinkedIn.ClientID, redirect, state)
 	default:
 		return "", "", "", time.Time{}, apperr.NotImpl(string(p) + " browser login")
 	}
@@ -357,6 +404,20 @@ func (a *App) browserLogin(cmd *cobra.Command, p platform.Platform, noBrowser bo
 			exp = time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second)
 		}
 		return packed, "", "", exp, nil
+	case platform.LinkedIn:
+		secret, err := keychain.GetRef(a.Keychain, a.Config.LinkedIn.ClientSecretRef, "goggles-linkedin-client-secret", "GOGGLES_LINKEDIN_CLIENT_SECRET")
+		if err != nil {
+			return "", "", "", time.Time{}, err
+		}
+		tok, err := li.Exchange(cmd.Context(), nil, a.Config.LinkedIn.ClientID, secret, redirect, code)
+		if err != nil {
+			return "", "", "", time.Time{}, err
+		}
+		uid, name, err := li.NewClient("", tok.AccessToken, a.Config.LinkedIn.APIVersion, nil).Me(cmd.Context())
+		if err != nil {
+			return "", "", "", time.Time{}, err
+		}
+		return tok.AccessToken, uid, name, time.Now().Add(time.Duration(tok.ExpiresIn) * time.Second), nil
 	default:
 		return "", "", "", time.Time{}, apperr.NotImpl(string(p) + " browser login")
 	}

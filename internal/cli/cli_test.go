@@ -198,3 +198,17 @@ func TestStorageMemoryFlow(t *testing.T) {
 		t.Fatalf("expected app id in config: %s", stdout)
 	}
 }
+
+func TestLinkedInTextDryRunWithoutR2(t *testing.T) {
+	home := t.TempDir()
+	if out, errout, code := run(t, home, "account", "add", "linkedin", "--alias", "my-linkedin", "--user-id", "42"); code != 0 {
+		t.Fatalf("account add: %d %s %s", code, out, errout)
+	}
+	out, errout, code := run(t, home, "publish", "--destination", "my-linkedin", "--caption", "Hello LinkedIn", "--dry-run", "--json")
+	if code != 0 {
+		t.Fatalf("publish: %d %s %s", code, out, errout)
+	}
+	if !strings.Contains(out, `"kind": "text"`) || !strings.Contains(out, `"status": "planned"`) {
+		t.Fatalf("unexpected output: %s", out)
+	}
+}

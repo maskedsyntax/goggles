@@ -235,7 +235,7 @@ func (e *Engine) publishProfile(ctx context.Context, item queue.Item) error {
 	if e.Runner == nil {
 		return apperr.New(apperr.DaemonUnavailable, "publish runner is not configured")
 	}
-	res, err := e.Runner.Run(ctx, publish.Request{Path: item.FilePath, Profile: item.Profile})
+	res, err := e.Runner.Run(ctx, publish.Request{Path: item.FilePath, Profile: item.Profile, Caption: item.Caption, Title: item.Title})
 	if err != nil {
 		return err
 	}
@@ -255,6 +255,8 @@ func (e *Engine) publishItem(ctx context.Context, destAlias string, item queue.I
 	res, err := e.Runner.Run(ctx, publish.Request{
 		Path:        item.FilePath,
 		Destination: destAlias,
+		Caption:     item.Caption,
+		Title:       item.Title,
 	})
 	if err != nil {
 		return err

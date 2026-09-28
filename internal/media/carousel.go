@@ -124,7 +124,7 @@ func HashCarousel(paths []string, audio string, slideSeconds float64, replaceAud
 
 func kindForExt(name string) string {
 	switch strings.ToLower(filepath.Ext(name)) {
-	case ".jpg", ".jpeg", ".png":
+	case ".jpg", ".jpeg", ".png", ".gif":
 		return KindImage
 	case ".mp4", ".mov":
 		return KindVideo

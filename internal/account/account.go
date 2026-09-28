@@ -73,6 +73,9 @@ func Add(ctx context.Context, sqlDB *sql.DB, in AddInput) (Pair, error) {
 	if in.Platform == platform.YouTube && strings.TrimSpace(in.ChannelID) == "" {
 		return Pair{}, apperr.New(apperr.YouTubeChannelRequired, "pass --channel-id; goggles never selects a YouTube channel silently")
 	}
+	if in.Platform == platform.LinkedIn && strings.TrimSpace(in.UserID) == "" {
+		return Pair{}, apperr.Invalid("pass --user-id for a LinkedIn member")
+	}
 
 	now := db.Now()
 	acc := Account{
@@ -104,6 +107,9 @@ func Add(ctx context.Context, sqlDB *sql.DB, in AddInput) (Pair, error) {
 		} else if dest.ExternalID == "" {
 			dest.ExternalID = dest.ExternalUsername
 		}
+	}
+	if dest.Platform == platform.LinkedIn {
+		dest.ExternalID = "urn:li:person:" + strings.TrimPrefix(strings.TrimSpace(in.UserID), "urn:li:person:")
 	}
 
 	err := db.WithTx(ctx, sqlDB, func(tx *sql.Tx) error {

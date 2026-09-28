@@ -4,9 +4,12 @@ import (
 	"strings"
 	"time"
 
+	"github.com/maskedsyntax/goggles/internal/account"
 	"github.com/maskedsyntax/goggles/internal/apperr"
 	"github.com/maskedsyntax/goggles/internal/platform"
+	"github.com/maskedsyntax/goggles/internal/profile"
 	"github.com/maskedsyntax/goggles/internal/publish"
+	"github.com/maskedsyntax/goggles/internal/storage"
 	"github.com/spf13/cobra"
 )
 
@@ -21,11 +24,11 @@ func newPublishCmd(app *App) *cobra.Command {
 	)
 	cmd := &cobra.Command{
 		Use:   "publish [file...]",
-		Short: "Publish a Reel, Short, or Instagram carousel",
+		Short: "Publish text, images, videos, or an Instagram carousel",
 		Args:  cobra.ArbitraryArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			if carouselDir == "" && len(args) == 0 {
-				return apperr.Invalid("pass a file, files, or --carousel <dir>")
+			if carouselDir == "" && len(args) == 0 && strings.TrimSpace(caption) == "" {
+				return apperr.Invalid("pass a file, files, --carousel <dir>, or --caption for a LinkedIn text post")
 			}
 			publishAt := ""
 			if at != "" {
@@ -36,10 +39,6 @@ func newPublishCmd(app *App) *cobra.Command {
 				publishAt = ts.UTC().Format(time.RFC3339)
 			}
 			if err := app.openDB(); err != nil {
-				return err
-			}
-			host, err := app.openHost(cmd.Context())
-			if err != nil {
 				return err
 			}
 			var plats []platform.Platform
@@ -54,6 +53,40 @@ func newPublishCmd(app *App) *cobra.Command {
 						return err
 					}
 					plats = append(plats, parsed)
+				}
+			}
+			var hostNeeded bool
+			if dest != "" {
+				d, err := account.GetDestinationByAlias(cmd.Context(), app.DB, dest)
+				if err != nil {
+					return err
+				}
+				hostNeeded = d.Platform == platform.Instagram
+			} else if profileName != "" {
+				v, err := profile.Show(cmd.Context(), app.DB, profileName)
+				if err != nil {
+					return err
+				}
+				for _, d := range v.Destinations {
+					if d.Platform == platform.Instagram {
+						if len(plats) == 0 {
+							hostNeeded = true
+						} else {
+							for _, p := range plats {
+								if p == platform.Instagram {
+									hostNeeded = true
+								}
+							}
+						}
+					}
+				}
+			}
+			var host storage.VideoHost
+			var err error
+			if hostNeeded {
+				host, err = app.openHost(cmd.Context())
+				if err != nil {
+					return err
 				}
 			}
 			runner := app.runner(host)
@@ -121,8 +154,8 @@ func newPublishCmd(app *App) *cobra.Command {
 	cmd.Flags().StringVar(&dest, "destination", "", "publish to one destination")
 	cmd.Flags().StringVar(&platforms, "platform", "", "limit a profile publish to platforms")
 	cmd.Flags().StringVar(&at, "at", "", "RFC3339 timestamp (YouTube publishAt; requires private)")
-	cmd.Flags().StringVar(&caption, "caption", "", "Instagram caption")
-	cmd.Flags().StringVar(&title, "title", "", "YouTube title")
+	cmd.Flags().StringVar(&caption, "caption", "", "Instagram caption or LinkedIn post text")
+	cmd.Flags().StringVar(&title, "title", "", "YouTube title or LinkedIn video title")
 	cmd.Flags().StringVar(&description, "description", "", "YouTube description")
 	cmd.Flags().StringVar(&tags, "tags", "", "comma-separated YouTube tags")
 	cmd.Flags().StringVar(&privacy, "privacy", "", "YouTube privacy: public, unlisted, or private")

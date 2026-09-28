@@ -1,8 +1,8 @@
 # goggles
 
-CLI-first short-form publisher for Instagram Reels and YouTube Shorts.
+CLI-first publisher for Instagram Reels, YouTube Shorts, and LinkedIn posts.
 
-Humans and coding agents queue finished MP4s; `goggles` owns credentials, validation, uploads, retries, and history. No desktop or web UI.
+Humans and coding agents publish finished media and LinkedIn text posts; `goggles` owns credentials, uploads, retries, and history. No desktop or web UI.
 
 See `spec.md` for the locked product specification.
 
@@ -74,9 +74,42 @@ goggles job retry job_01K... --json
 goggles history list --json
 ```
 
+## LinkedIn member posts
+
+Create a LinkedIn developer app with **Share on LinkedIn** and **Sign In with LinkedIn using OpenID Connect** enabled. Add `http://127.0.0.1:8787/callback` as an authorized redirect URL. Goggles requests `w_member_social`, `openid`, and `profile` and publishes to the signed-in member's feed. LinkedIn's OAuth access tokens expire; run `auth login` again when needed. You can use `auth login linkedin --alias ... --access-token ...` with a token that has those scopes.
+
+```sh
+goggles auth setup linkedin --client-id CLIENT_ID --client-secret CLIENT_SECRET
+goggles auth login linkedin --alias my-linkedin
+goggles account test my-linkedin
+
+goggles publish --destination my-linkedin --caption "A text post"
+goggles publish ./photo.jpg --destination my-linkedin --caption "An image post"
+goggles publish ./video.mp4 --destination my-linkedin --caption "A video post" --title "Video title"
+goggles publish ./photos --destination my-linkedin --caption "A multi-image post"
+goggles publish ./one.jpg ./two.png --destination my-linkedin --caption "Two images"
+
+# Schedule one LinkedIn post (RFC3339 time with timezone).
+goggles queue add --destination my-linkedin --caption "A text post" --at "2026-10-01T09:00:00+05:30"
+goggles queue add ./photo.jpg --destination my-linkedin --caption "An image post" --at "2026-10-01T09:00:00+05:30"
+goggles queue add ./video.mp4 --destination my-linkedin --caption "A video post" --title "Video title" --at "2026-10-01T09:00:00+05:30"
+
+# Or set recurring slots and fill the destination queue.
+goggles schedule set --destination my-linkedin --timezone Asia/Kolkata 09:00 18:00
+goggles queue add ./photo.jpg --destination my-linkedin --caption "Next scheduled image"
+goggles daemon install
+goggles queue list --destination my-linkedin --json
+```
+
+LinkedIn supports one video, one image, or 2–20 images in a post. Mixed image/video collections are unsupported. The `linkedin.caption` and `linkedin.title` sidecar fields work alongside CLI flags. LinkedIn uploads media directly, so it does not need R2. Text-only posts require `--caption` and can be published immediately; the file-backed queue remains for media posts. LinkedIn company pages are not yet supported.
+
+Scheduled posts are published by the Goggles daemon, so keep it running and leave queued media files at their original paths until they publish. LinkedIn tokens expire after about two months; reconnect the account before a future scheduled post if its token has expired. Queue items store `--caption` and `--title` at enqueue time; sidecar metadata remains available when those flags are omitted.
+
+See LinkedIn's [Posts API](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/posts-api), [Images API](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/images-api), and [Videos API](https://learn.microsoft.com/en-us/linkedin/marketing/community-management/shares/videos-api) for API and permission details.
+
 Metadata: optional `video.yaml` sidecar next to `video.mp4`, or `carousel.yaml` / `goggles.yaml` inside a carousel directory. Precedence is CLI flags, then destination sidecar, then platform sidecar.
 
-Instagram carousels are 2–10 JPEG images and/or videos (`--carousel DIR`, a directory argument, or multiple files). PNG stills are converted to JPEG. `--audio` bakes a soundtrack into stills (default 3s per slide) and into silent videos; videos that already have audio keep it unless `--replace-audio`. Carousels are Instagram-only — YouTube jobs fail with `INVALID_INPUT`. Queue/daemon still consume single files.
+Instagram carousels are 2–10 JPEG images and/or videos (`--carousel DIR`, a directory argument, or multiple files). PNG stills are converted to JPEG. `--audio` bakes a soundtrack into stills (default 3s per slide) and into silent videos; videos that already have audio keep it unless `--replace-audio`. Instagram carousels cannot be published to YouTube; LinkedIn accepts only image-only collections. Queue/daemon still consume single files.
 
 JSON shape and process exit codes: `docs/json-and-exit-codes.md`.
 

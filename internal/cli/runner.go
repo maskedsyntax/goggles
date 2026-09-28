@@ -13,11 +13,12 @@ func (a *App) tokens() *token.Source {
 
 func (a *App) runner(host storage.VideoHost) *publish.Runner {
 	return &publish.Runner{
-		DB:          a.DB,
-		Host:        host,
-		Keychain:    a.Keychain,
-		Tokens:      a.tokens(),
-		GraphBase:   ig.GraphBase(a.Config.Meta.GraphHost, a.Config.Meta.GraphVersion),
-		MaxAttempts: a.Config.Publishing.MaxRetries,
+		DB:              a.DB,
+		Host:            host,
+		Keychain:        a.Keychain,
+		Tokens:          a.tokens(),
+		GraphBase:       ig.GraphBase(a.Config.Meta.GraphHost, a.Config.Meta.GraphVersion),
+		LinkedInVersion: a.Config.LinkedIn.APIVersion,
+		MaxAttempts:     a.Config.Publishing.MaxRetries,
 	}
 }

@@ -13,6 +13,7 @@ import (
 	"github.com/maskedsyntax/goggles/internal/keychain"
 	"github.com/maskedsyntax/goggles/internal/platform"
 	"github.com/maskedsyntax/goggles/internal/platform/instagram"
+	"github.com/maskedsyntax/goggles/internal/platform/linkedin"
 	"github.com/maskedsyntax/goggles/internal/platform/youtube"
 	"github.com/maskedsyntax/goggles/internal/storage"
 )
@@ -291,5 +292,52 @@ func TestAutoRetrySchedulesBackoff(t *testing.T) {
 	}
 	if res.Success || len(res.Jobs) != 1 || res.Jobs[0].Status != "retry_wait" {
 		t.Fatalf("%+v", res)
+	}
+}
+
+type linkedInStub struct{ posts int }
+
+func (s *linkedInStub) Me(context.Context) (string, string, error) { return "42", "Member", nil }
+func (s *linkedInStub) UploadImage(context.Context, string, string) (string, error) {
+	return "urn:li:image:1", nil
+}
+func (s *linkedInStub) UploadVideo(context.Context, string, string) (string, error) {
+	return "urn:li:video:1", nil
+}
+func (s *linkedInStub) CreatePost(_ context.Context, owner, text, title, media string, images []string) (string, error) {
+	s.posts++
+	return "urn:li:share:123", nil
+}
+func (s *linkedInStub) PostStatus(context.Context, string) (string, error) { return "PUBLISHED", nil }
+func TestLinkedInTextPublishAndDuplicate(t *testing.T) {
+	sqlDB, err := db.Open(filepath.Join(t.TempDir(), "goggles.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer sqlDB.Close()
+	ctx := context.Background()
+	pair, err := account.Add(ctx, sqlDB, account.AddInput{Platform: platform.LinkedIn, Alias: "member", UserID: "42", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	kc := keychain.NewMemory()
+	if err := kc.Set("linkedin/"+pair.Account.ID, "token"); err != nil {
+		t.Fatal(err)
+	}
+	api := &linkedInStub{}
+	r := &Runner{DB: sqlDB, Keychain: kc, NewLIClient: func(string) linkedin.API { return api }}
+	res, err := r.Run(ctx, Request{Destination: "member", Caption: "Hello LinkedIn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Success || res.Kind != "text" || res.Jobs[0].ExternalMediaID != "urn:li:share:123" || api.posts != 1 {
+		t.Fatalf("res=%+v posts=%d", res, api.posts)
+	}
+	res, err = r.Run(ctx, Request{Destination: "member", Caption: "Hello LinkedIn"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Success || res.Jobs[0].ErrorCode != string(apperr.DuplicateContent) || api.posts != 1 {
+		t.Fatalf("duplicate res=%+v posts=%d", res, api.posts)
 	}
 }

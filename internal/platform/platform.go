@@ -14,6 +14,7 @@ type Platform string
 const (
 	Instagram Platform = "instagram"
 	YouTube   Platform = "youtube"
+	LinkedIn  Platform = "linkedin"
 )
 
 func Parse(s string) (Platform, error) {
@@ -22,8 +23,10 @@ func Parse(s string) (Platform, error) {
 		return Instagram, nil
 	case YouTube:
 		return YouTube, nil
+	case LinkedIn:
+		return LinkedIn, nil
 	default:
-		return "", apperr.Invalid("unsupported platform " + s + " (instagram|youtube)")
+		return "", apperr.Invalid("unsupported platform " + s + " (instagram|youtube|linkedin)")
 	}
 }
 

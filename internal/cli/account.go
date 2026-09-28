@@ -8,12 +8,13 @@ import (
 	"github.com/maskedsyntax/goggles/internal/apperr"
 	"github.com/maskedsyntax/goggles/internal/platform"
 	ig "github.com/maskedsyntax/goggles/internal/platform/instagram"
+	li "github.com/maskedsyntax/goggles/internal/platform/linkedin"
 	yt "github.com/maskedsyntax/goggles/internal/platform/youtube"
 	"github.com/spf13/cobra"
 )
 
 func newAccountCmd(app *App) *cobra.Command {
-	cmd := &cobra.Command{Use: "account", Short: "Connect Instagram accounts and YouTube channels"}
+	cmd := &cobra.Command{Use: "account", Short: "Connect social accounts and destinations"}
 
 	var (
 		alias, username, channelID, channelTitle, timezone, displayName, accessToken, userID string
@@ -81,7 +82,7 @@ func newAccountCmd(app *App) *cobra.Command {
 	add.Flags().StringVar(&timezone, "timezone", "", "destination timezone")
 	add.Flags().BoolVar(&disabled, "disabled", false, "create disabled")
 	add.Flags().StringVar(&accessToken, "access-token", "", "store a platform access token in the keychain")
-	add.Flags().StringVar(&userID, "user-id", "", "Instagram professional account id")
+	add.Flags().StringVar(&userID, "user-id", "", "Instagram account or LinkedIn member id")
 
 	cmd.AddCommand(
 		add,
@@ -193,6 +194,16 @@ func newAccountCmd(app *App) *cobra.Command {
 					}
 					out["channel_id"] = ch.ID
 					out["channel_title"] = ch.Title
+				case platform.LinkedIn:
+					id, name, err := li.NewClient("", tok, app.Config.LinkedIn.APIVersion, nil).Me(cmd.Context())
+					if err != nil {
+						return err
+					}
+					if pair.Destination.ExternalID != "urn:li:person:"+id {
+						return apperr.New(apperr.AuthRequired, "LinkedIn token belongs to a different member")
+					}
+					out["member_id"] = id
+					out["name"] = name
 				default:
 					return apperr.NotImpl(string(pair.Account.Platform) + " account test")
 				}

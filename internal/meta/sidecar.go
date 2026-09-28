@@ -14,12 +14,14 @@ type File struct {
 	Profile      string            `yaml:"profile"`
 	Instagram    PlatformFields    `yaml:"instagram"`
 	YouTube      PlatformFields    `yaml:"youtube"`
+	LinkedIn     PlatformFields    `yaml:"linkedin"`
 	Destinations map[string]Target `yaml:"destinations"`
 }
 
 type Target struct {
 	Instagram PlatformFields `yaml:"instagram"`
 	YouTube   PlatformFields `yaml:"youtube"`
+	LinkedIn  PlatformFields `yaml:"linkedin"`
 }
 
 type PlatformFields struct {
@@ -92,11 +94,15 @@ func (f File) For(destAlias string, p platform.Platform) (dest, plat PlatformFie
 	plat = f.YouTube
 	if p == platform.Instagram {
 		plat = f.Instagram
+	} else if p == platform.LinkedIn {
+		plat = f.LinkedIn
 	}
 	if f.Destinations != nil {
 		if t, ok := f.Destinations[destAlias]; ok {
 			if p == platform.Instagram {
 				dest = t.Instagram
+			} else if p == platform.LinkedIn {
+				dest = t.LinkedIn
 			} else {
 				dest = t.YouTube
 			}

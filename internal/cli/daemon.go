@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/maskedsyntax/goggles/internal/daemon"
+	"github.com/maskedsyntax/goggles/internal/storage"
 	"github.com/spf13/cobra"
 )
 
@@ -24,9 +25,17 @@ func newDaemonCmd(app *App) *cobra.Command {
 			if err := app.openDB(); err != nil {
 				return err
 			}
-			host, err := app.openHost(cmd.Context())
-			if err != nil {
+			var instagramCount int
+			if err := app.DB.QueryRowContext(cmd.Context(), "SELECT COUNT(*) FROM destinations WHERE platform='instagram' AND enabled=1").Scan(&instagramCount); err != nil {
 				return err
+			}
+			var host storage.VideoHost
+			var err error
+			if instagramCount > 0 {
+				host, err = app.openHost(cmd.Context())
+				if err != nil {
+					return err
+				}
 			}
 			runner := app.runner(host)
 			runner.AutoRetry = true

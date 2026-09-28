@@ -2,7 +2,9 @@ package publish
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -17,6 +19,7 @@ import (
 	"github.com/maskedsyntax/goggles/internal/meta"
 	"github.com/maskedsyntax/goggles/internal/platform"
 	"github.com/maskedsyntax/goggles/internal/platform/instagram"
+	"github.com/maskedsyntax/goggles/internal/platform/linkedin"
 	"github.com/maskedsyntax/goggles/internal/platform/youtube"
 	"github.com/maskedsyntax/goggles/internal/profile"
 	"github.com/maskedsyntax/goggles/internal/storage"
@@ -78,16 +81,19 @@ type TokenSource interface {
 }
 
 type Runner struct {
-	DB          *sql.DB
-	Host        storage.VideoHost
-	Keychain    keychain.Store
-	Tokens      TokenSource
-	GraphBase   string
-	YouTubeBase string
-	NewIGClient func(token string) instagram.API
-	NewYTClient func(token string) youtube.API
-	AutoRetry   bool
-	MaxAttempts int
+	DB              *sql.DB
+	Host            storage.VideoHost
+	Keychain        keychain.Store
+	Tokens          TokenSource
+	GraphBase       string
+	YouTubeBase     string
+	NewIGClient     func(token string) instagram.API
+	NewYTClient     func(token string) youtube.API
+	LinkedInBase    string
+	LinkedInVersion string
+	NewLIClient     func(token string) linkedin.API
+	AutoRetry       bool
+	MaxAttempts     int
 }
 
 func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
@@ -98,6 +104,12 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 	if len(dests) == 0 {
 		return nil, apperr.New(apperr.DestinationNotFound, "no destinations to publish to")
 	}
+	hasInstagram := false
+	for _, d := range dests {
+		if d.Platform == platform.Instagram {
+			hasInstagram = true
+		}
+	}
 	if req.Path == "" {
 		if req.CarouselDir != "" {
 			req.Path = req.CarouselDir
@@ -105,19 +117,43 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 			req.Path = req.Paths[0]
 		}
 	}
-	sidecar, err := meta.LoadFor(req.Path)
-	if err != nil {
-		return nil, apperr.Wrap(apperr.InvalidInput, "cannot read sidecar yaml", err)
+	textOnly := req.Path == "" && len(req.Paths) == 0 && req.CarouselDir == ""
+	if textOnly {
+		for _, d := range dests {
+			if d.Platform != platform.LinkedIn {
+				return nil, apperr.Invalid("text-only posts require LinkedIn destinations")
+			}
+		}
+		if strings.TrimSpace(req.Caption) == "" {
+			return nil, apperr.Invalid("LinkedIn text posts need --caption")
+		}
+	}
+	var sidecar meta.File
+	if !textOnly {
+		sidecar, err = meta.LoadFor(req.Path)
+		if err != nil {
+			return nil, apperr.Wrap(apperr.InvalidInput, "cannot read sidecar yaml", err)
+		}
 	}
 	req = overlayMedia(req, sidecar)
-	items, err := collectItems(ctx, req)
-	if err != nil {
-		return nil, err
+	var items []media.Item
+	if !textOnly {
+		items, err = collectItems(ctx, req)
+		if err != nil {
+			return nil, err
+		}
 	}
-	carousel := media.IsCarousel(items)
+	carousel := len(items) >= 2
 	if carousel {
-		if n := len(items); n < media.MinCarouselItems || n > media.MaxCarouselItems {
-			return nil, apperr.Invalid(fmt.Sprintf("Instagram carousels need 2–10 items, got %d", n))
+		max := 20
+		if hasInstagram {
+			max = media.MaxCarouselItems
+		}
+		if n := len(items); n > max {
+			return nil, apperr.Invalid(fmt.Sprintf("too many images: maximum %d for selected destinations, got %d", max, n))
+		}
+		if !hasInstagram && req.Audio != "" {
+			return nil, apperr.Invalid("--audio is only supported for Instagram carousels")
 		}
 	} else if req.Audio != "" || req.ReplaceAudio || req.SlideSecondsSet {
 		return nil, apperr.Invalid("--audio, --slide-seconds, and --replace-audio apply to Instagram carousels")
@@ -130,7 +166,13 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 		return nil, apperr.Invalid(fmt.Sprintf("--slide-seconds must be <= %.0f", media.MaxSlideSeconds))
 	}
 	sourcePaths := itemPaths(items)
-	hash := items[0].Info.Hash
+	hash := ""
+	if textOnly {
+		sum := sha256.Sum256([]byte("linkedin:text:" + req.Caption))
+		hash = hex.EncodeToString(sum[:])
+	} else {
+		hash = items[0].Info.Hash
+	}
 	if carousel {
 		hash, err = media.HashCarousel(sourcePaths, req.Audio, slide, req.ReplaceAudio)
 		if err != nil {
@@ -144,10 +186,19 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 		DryRun:     req.DryRun,
 		Items:      sourcePaths,
 		Audio:      req.Audio,
-		Kind:       "reel",
+		Kind:       "video",
+	}
+	if textOnly {
+		out.Kind = "text"
+	} else if len(items) == 1 && items[0].Kind == media.KindImage {
+		out.Kind = "image"
 	}
 	if carousel {
-		out.Kind = "carousel"
+		if hasInstagram {
+			out.Kind = "carousel"
+		} else {
+			out.Kind = "multi_image"
+		}
 	}
 
 	if req.DryRun {
@@ -158,7 +209,7 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 		return out, nil
 	}
 
-	if media.NeedsPrepare(items, req.Audio) {
+	if !textOnly && hasInstagram && media.NeedsPrepare(items, req.Audio) {
 		workDir, err := os.MkdirTemp("", "goggles-carousel-*")
 		if err != nil {
 			return nil, apperr.Wrap(apperr.VideoInvalid, "cannot create carousel work directory", err)
@@ -174,7 +225,10 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 			return nil, err
 		}
 	}
-	platMedia := toPlatformMedia(items, hash)
+	var platMedia platform.Media
+	if !textOnly {
+		platMedia = toPlatformMedia(items, hash)
+	}
 
 	batch, err := jobs.CreateBatch(ctx, r.DB, req.Path, hash)
 	if err != nil {
@@ -209,6 +263,24 @@ func (r *Runner) Run(ctx context.Context, req Request) (*Result, error) {
 
 func (r *Runner) Retry(ctx context.Context, v jobs.View) (*Result, error) {
 	req := Request{Path: v.SourceFilePath, Destination: v.Destination, AllowDuplicate: true}
+	if v.Job.Platform == string(platform.LinkedIn) {
+		if st, err := jobs.ProviderState(ctx, r.DB, v.Job.ID); err == nil {
+			req.Caption, _ = st["caption"].(string)
+			req.Title, _ = st["title"].(string)
+		}
+	}
+	if req.Path == "" && v.Job.Platform == string(platform.LinkedIn) {
+		if req.Caption == "" {
+			return nil, apperr.Invalid("cannot retry LinkedIn text post without its saved caption")
+		}
+		d, err := account.GetDestinationByAlias(ctx, r.DB, v.Destination)
+		if err != nil {
+			return nil, err
+		}
+		sum := sha256.Sum256([]byte("linkedin:text:" + req.Caption))
+		jr := r.runOne(ctx, v.BatchID, d, platform.Media{}, hex.EncodeToString(sum[:]), req, meta.File{}, &v.Job)
+		return &Result{SourceFile: "", BatchID: v.BatchID, Kind: "text", Jobs: []JobResult{jr}, Success: jr.Status == jobs.Completed}, nil
+	}
 	sidecar, err := meta.LoadFor(req.Path)
 	if err != nil {
 		return nil, apperr.Wrap(apperr.InvalidInput, "cannot read sidecar yaml", err)
@@ -271,6 +343,9 @@ func (r *Runner) runOne(ctx context.Context, batchID string, d account.Destinati
 	}
 	jr.JobID = job.ID
 	req = overlaySidecar(req, sidecar, d.Alias, d.Platform)
+	if d.Platform == platform.LinkedIn {
+		_ = jobs.MergeProviderState(ctx, r.DB, job.ID, map[string]any{"caption": req.Caption, "title": req.Title})
+	}
 	if !d.Enabled {
 		jr.Status = jobs.Failed
 		jr.ErrorCode = string(apperr.DestinationDisabled)
@@ -316,6 +391,9 @@ func (r *Runner) runOne(ctx context.Context, batchID string, d account.Destinati
 		jr.ErrorMessage = err.Error()
 		_ = jobs.SetStatus(ctx, r.DB, job.ID, jobs.Failed, err, "", "")
 		return jr
+	}
+	if m.Path == "" && d.Platform != platform.LinkedIn {
+		return r.failJob(ctx, job, jr, apperr.Invalid("text-only posts require LinkedIn"), "", "")
 	}
 
 	pub, err := r.publisherFor(ctx, d, job.ID)
@@ -402,6 +480,14 @@ func (r *Runner) publisherFor(ctx context.Context, d account.Destination, jobID 
 		p.DB = r.DB
 		p.JobID = jobID
 		return p, nil
+	case platform.LinkedIn:
+		var api linkedin.API
+		if r.NewLIClient != nil {
+			api = r.NewLIClient(token)
+		} else {
+			api = linkedin.NewClient(r.LinkedInBase, token, r.LinkedInVersion, nil)
+		}
+		return linkedin.New(api), nil
 	default:
 		return nil, apperr.NotImpl(string(d.Platform) + " publishing")
 	}
