@@ -91,6 +91,22 @@ func TestLinkedInQueuedTextAndMediaMetadata(t *testing.T) {
 	if _, err := Add(ctx, sqlDB, AddInput{Destination: "yt", Caption: "No"}); err == nil {
 		t.Fatal("accepted text-only YouTube post")
 	}
+	album := filepath.Join(t.TempDir(), "album")
+	if err := os.Mkdir(album, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"01.jpg", "02.png"} {
+		if err := os.WriteFile(filepath.Join(album, name), []byte(name), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	collection, err := Add(ctx, sqlDB, AddInput{Path: album, Destination: "li", Caption: "Two concepts", ScheduledFor: when})
+	if err != nil || collection.FilePath != album || collection.ContentHash == "" {
+		t.Fatalf("collection=%+v err=%v", collection, err)
+	}
+	if _, err := Add(ctx, sqlDB, AddInput{Path: album, Destination: "yt"}); err == nil {
+		t.Fatal("accepted image collection for YouTube")
+	}
 }
 
 func TestQueueFill(t *testing.T) {

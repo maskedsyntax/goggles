@@ -16,7 +16,7 @@ func newQueueCmd(app *App) *cobra.Command {
 
 	add := &cobra.Command{
 		Use:   "add [file]",
-		Short: "Enqueue a media or LinkedIn text post",
+		Short: "Enqueue media, a LinkedIn image directory, or text post",
 		Args:  cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			path := ""

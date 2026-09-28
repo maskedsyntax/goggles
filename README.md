@@ -93,6 +93,7 @@ goggles publish ./one.jpg ./two.png --destination my-linkedin --caption "Two ima
 goggles queue add --destination my-linkedin --caption "A text post" --at "2026-10-01T09:00:00+05:30"
 goggles queue add ./photo.jpg --destination my-linkedin --caption "An image post" --at "2026-10-01T09:00:00+05:30"
 goggles queue add ./video.mp4 --destination my-linkedin --caption "A video post" --title "Video title" --at "2026-10-01T09:00:00+05:30"
+goggles queue add ./photos --destination my-linkedin --caption "An image collection" --at "2026-10-01T09:00:00+05:30"
 
 # Or set recurring slots and fill the destination queue.
 goggles schedule set --destination my-linkedin --timezone Asia/Kolkata 09:00 18:00

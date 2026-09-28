@@ -65,6 +65,7 @@ func Add(ctx context.Context, sqlDB *sql.DB, in AddInput) (Item, error) {
 		return Item{}, apperr.Invalid("pass --profile or --destination")
 	}
 	abs, hash := "", ""
+	carousel := false
 	if in.Path != "" {
 		st, err := os.Stat(in.Path)
 		if err != nil {
@@ -73,14 +74,30 @@ func Add(ctx context.Context, sqlDB *sql.DB, in AddInput) (Item, error) {
 			}
 			return Item{}, apperr.Wrap(apperr.FileUnreadable, "cannot read file", err)
 		}
-		if st.IsDir() {
-			return Item{}, apperr.Invalid("path is a directory; use queue fill")
-		}
 		abs, err = filepath.Abs(in.Path)
 		if err != nil {
 			abs = in.Path
 		}
-		hash, err = media.HashFile(abs)
+		if st.IsDir() {
+			carousel = true
+			paths, err := media.ListCarouselFiles(abs)
+			if err != nil {
+				return Item{}, err
+			}
+			if len(paths) < 2 || len(paths) > 20 {
+				return Item{}, apperr.Invalid("LinkedIn image collections need 2–20 images")
+			}
+			for _, path := range paths {
+				switch strings.ToLower(filepath.Ext(path)) {
+				case ".jpg", ".jpeg", ".png":
+				default:
+					return Item{}, apperr.Invalid("LinkedIn image collections cannot include video or unsupported images")
+				}
+			}
+			hash, err = media.HashCarousel(paths, "", media.DefaultSlideSeconds, false)
+		} else {
+			hash, err = media.HashFile(abs)
+		}
 		if err != nil {
 			return Item{}, err
 		}
@@ -109,11 +126,17 @@ func Add(ctx context.Context, sqlDB *sql.DB, in AddInput) (Item, error) {
 		if in.Path == "" && d.Platform != platform.LinkedIn {
 			return Item{}, apperr.Invalid("text-only queue items require a LinkedIn destination")
 		}
+		if carousel && d.Platform != platform.LinkedIn {
+			return Item{}, apperr.Invalid("image collection queue items require a LinkedIn destination")
+		}
 		destID = d.ID
 		destAlias = d.Alias
 	}
 	if in.Path == "" && in.Profile != "" {
 		return Item{}, apperr.Invalid("text-only queue items require --destination")
+	}
+	if carousel && in.Profile != "" {
+		return Item{}, apperr.Invalid("image collection queue items require --destination")
 	}
 	metadata, err := json.Marshal(struct {
 		Caption string `json:"caption,omitempty"`
