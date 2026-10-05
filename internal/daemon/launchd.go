@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"bytes"
+	"encoding/xml"
 	"fmt"
 	"os"
 	"os/exec"
@@ -35,6 +37,21 @@ func InstallLaunchAgent(exe, logDir string) (string, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return "", err
 	}
+	// launchd starts agents with a minimal PATH, which omits Homebrew's ffprobe.
+	// Preserve the tool directories found during installation for scheduled videos.
+	toolPaths := []string{"/usr/bin", "/bin", "/usr/sbin", "/sbin"}
+	for _, tool := range []string{"ffprobe", "ffmpeg"} {
+		if found, err := exec.LookPath(tool); err == nil {
+			dir := filepath.Dir(found)
+			if !containsPath(toolPaths, dir) {
+				toolPaths = append([]string{dir}, toolPaths...)
+			}
+		}
+	}
+	var escapedPath bytes.Buffer
+	if err := xml.EscapeText(&escapedPath, []byte(strings.Join(toolPaths, ":"))); err != nil {
+		return "", err
+	}
 	body := fmt.Sprintf(`<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -51,13 +68,18 @@ func InstallLaunchAgent(exe, logDir string) (string, error) {
   <true/>
   <key>KeepAlive</key>
   <true/>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>%s</string>
+  </dict>
   <key>StandardOutPath</key>
   <string>%s</string>
   <key>StandardErrorPath</key>
   <string>%s</string>
 </dict>
 </plist>
-`, launchLabel, exe, filepath.Join(logDir, "daemon.out.log"), filepath.Join(logDir, "daemon.err.log"))
+`, launchLabel, exe, escapedPath.String(), filepath.Join(logDir, "daemon.out.log"), filepath.Join(logDir, "daemon.err.log"))
 	if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
 		return "", err
 	}
@@ -69,6 +91,15 @@ func InstallLaunchAgent(exe, logDir string) (string, error) {
 		}
 	}
 	return path, nil
+}
+
+func containsPath(paths []string, target string) bool {
+	for _, path := range paths {
+		if path == target {
+			return true
+		}
+	}
+	return false
 }
 
 func UninstallLaunchAgent() error {
