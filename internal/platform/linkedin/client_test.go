@@ -57,7 +57,7 @@ func TestVideoMultipartUpload(t *testing.T) {
 			}
 			finalized = true
 			return response(200, "{}", nil), nil
-		case strings.HasPrefix(r.URL.Path, "/rest/videos/urn:li:video:"):
+		case r.URL.EscapedPath() == "/rest/videos/urn%3Ali%3Avideo%3A1":
 			return response(200, `{"status":"AVAILABLE"}`, nil), nil
 		}
 		t.Fatalf("unexpected request %s", r.URL)
@@ -90,6 +90,19 @@ func TestTextPostRequest(t *testing.T) {
 	id, err := c.CreatePost(context.Background(), "urn:li:person:42", "hello", "", "", nil)
 	if err != nil || id != "urn:li:share:123" {
 		t.Fatalf("id=%s err=%v", id, err)
+	}
+}
+
+func TestPostStatusEncodesURN(t *testing.T) {
+	c := NewClient("https://api.linkedin.com", "token", "202609", &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		if got := r.URL.EscapedPath(); got != "/rest/posts/urn%3Ali%3Ashare%3A123" {
+			t.Fatalf("path = %s", got)
+		}
+		return response(200, `{"lifecycleState":"PUBLISHED"}`, nil), nil
+	})})
+	status, err := c.PostStatus(context.Background(), "urn:li:share:123")
+	if err != nil || status != "PUBLISHED" {
+		t.Fatalf("status=%q err=%v", status, err)
 	}
 }
 

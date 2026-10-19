@@ -217,7 +217,7 @@ func (c *Client) waitVideoReady(ctx context.Context, id string) error {
 	deadline := time.NewTimer(5 * time.Minute)
 	defer deadline.Stop()
 	for {
-		res, err := c.request(ctx, "GET", "/rest/videos/"+url.PathEscape(id), nil)
+		res, err := c.request(ctx, "GET", "/rest/videos/"+restPathURN(id), nil)
 		if err != nil {
 			return err
 		}
@@ -274,7 +274,7 @@ func (c *Client) CreatePost(ctx context.Context, owner, commentary, title, media
 	return id, nil
 }
 func (c *Client) PostStatus(ctx context.Context, id string) (string, error) {
-	res, err := c.request(ctx, "GET", "/rest/posts/"+id, nil)
+	res, err := c.request(ctx, "GET", "/rest/posts/"+restPathURN(id), nil)
 	if err != nil {
 		return "", err
 	}
@@ -286,4 +286,11 @@ func (c *Client) PostStatus(ctx context.Context, id string) (string, error) {
 		return "", err
 	}
 	return v.LifecycleState, nil
+}
+
+// Rest.li path variables require colons in URNs to be percent encoded.
+// url.PathEscape leaves colons untouched, which LinkedIn rejects with a
+// "Syntax exception in path variables" response.
+func restPathURN(id string) string {
+	return strings.ReplaceAll(url.PathEscape(id), ":", "%3A")
 }
